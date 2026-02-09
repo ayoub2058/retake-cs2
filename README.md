@@ -39,3 +39,7 @@ npm run dev
 ```
 
 Open http://localhost:3000 to view the app.
+
+## Notes
+
+- Demo files downloaded to `downloads/` are generated locally and are ignored by git.
