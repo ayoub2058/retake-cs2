@@ -9,14 +9,15 @@ const downloadsDir = path.join(process.cwd(), "downloads");
 
 export async function GET(
   _request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: { id: string } | Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const session = await getSteamSessionFromCookies();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const matchId = Number(params.id);
+  const matchId = Number(id);
   if (!Number.isFinite(matchId)) {
     return NextResponse.json({ error: "Invalid match id" }, { status: 400 });
   }
