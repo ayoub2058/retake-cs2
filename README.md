@@ -4,7 +4,7 @@ Retake is a CS2 match analytics dashboard that collects demos, parses rounds, an
 
 ## Tech Stack
 
-- Next.js 14 (App Router)
+- Next.js 16 (App Router)
 - Supabase (Postgres + Auth)
 - Tailwind CSS
 - Shadcn UI
@@ -43,3 +43,4 @@ Open http://localhost:3000 to view the app.
 ## Notes
 
 - Demo files downloaded to `downloads/` are generated locally and are ignored by git.
+- If you need to bypass type/lint errors during CI, set `ALLOW_BUILD_ERRORS=true` (not recommended for production).
