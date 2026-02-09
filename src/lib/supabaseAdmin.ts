@@ -1,12 +1,29 @@
 import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-// Retrieve environment variables
-// We add "|| ''" (OR empty string) so it doesn't be undefined during build
-const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const hasConfig = Boolean(supabaseUrl && serviceRoleKey);
 
-export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
-  auth: {
-    persistSession: false,
-  },
-});
+const createAdminClient = () =>
+  createClient(supabaseUrl as string, serviceRoleKey as string, {
+    auth: {
+      persistSession: false,
+    },
+  });
+
+const createMissingConfigProxy = () =>
+  new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "Supabase admin env vars are missing. Set SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY."
+        );
+      },
+    }
+  ) as SupabaseClient;
+
+export const supabaseAdmin: SupabaseClient = hasConfig
+  ? createAdminClient()
+  : createMissingConfigProxy();
