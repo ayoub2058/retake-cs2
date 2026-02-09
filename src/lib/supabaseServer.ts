@@ -25,9 +25,25 @@ const resolveCookieStore = async () => {
   return cookieStore;
 };
 
-const safeGetAll = (cookieStore: { getAll?: () => unknown[] }) => {
+type CookieEntry = { name: string; value: string };
+
+const safeGetAll = (cookieStore: { getAll?: () => unknown[] }): CookieEntry[] => {
   if (typeof cookieStore.getAll === "function") {
-    return cookieStore.getAll();
+    const items = cookieStore.getAll();
+    if (Array.isArray(items)) {
+      return items
+        .map((item) => {
+          if (!item || typeof item !== "object") {
+            return null;
+          }
+          const record = item as { name?: unknown; value?: unknown };
+          if (typeof record.name !== "string" || typeof record.value !== "string") {
+            return null;
+          }
+          return { name: record.name, value: record.value };
+        })
+        .filter((item): item is CookieEntry => Boolean(item));
+    }
   }
   return [];
 };
