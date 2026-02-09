@@ -57,7 +57,7 @@ export const MatchTable = ({ matches }: { matches: MatchRow[] }) => {
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
-                    <MapIcon mapName={match.map_name} />
+                    <MapIcon mapName={match.map_name ?? null} />
                     <span>{formatMapName(match.map_name)}</span>
                   </div>
                 </td>
