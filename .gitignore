@@ -24,6 +24,10 @@
 .DS_Store
 *.pem
 
+# downloaded demos
+/downloads/
+*.dem
+
 # debug
 npm-debug.log*
 yarn-debug.log*
