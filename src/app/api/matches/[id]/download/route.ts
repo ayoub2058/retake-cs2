@@ -46,9 +46,9 @@ export async function GET(
   }
 
   const stat = fs.statSync(resolvedPath);
-  const stream = fs.createReadStream(resolvedPath);
+  const buffer = fs.readFileSync(resolvedPath);
 
-  return new Response(Readable.toWeb(stream), {
+  return new Response(buffer, {
     headers: {
       "Content-Type": "application/octet-stream",
       "Content-Length": String(stat.size),
