@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "pipeline": "node scripts/start_pipeline.js",
+    "pipeline:poller": "python scripts/poll_matches.py",
+    "pipeline:downloader": "node scripts/replay_downloader.js",
+    "pipeline:parser": "python scripts/parse_match.py"
   },
   "dependencies": {
     "@supabase/ssr": "^0.8.0",

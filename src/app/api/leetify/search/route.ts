@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSteamSessionFromCookies } from "@/lib/steamSessionServer";
 
 type LeetifyPlayer = {
   id: string | null;
@@ -49,6 +50,11 @@ const extractPlayer = (payload: unknown): LeetifyPlayer | null => {
 };
 
 export async function GET(request: NextRequest) {
+  const session = await getSteamSessionFromCookies();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim();
 

@@ -32,7 +32,8 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  if (matchRow.status !== "downloaded" || !matchRow.file_path) {
+  const allowedStatuses = ["downloaded", "processed", "parsed", "notified"];
+  if (!allowedStatuses.includes(matchRow.status) || !matchRow.file_path) {
     return NextResponse.json({ error: "Replay not available" }, { status: 404 });
   }
 

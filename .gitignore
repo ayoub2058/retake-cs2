@@ -28,6 +28,11 @@
 /downloads/
 *.dem
 
+# python
+__pycache__/
+*.pyc
+.venv/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

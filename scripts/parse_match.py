@@ -1,11 +1,18 @@
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
+
+# Fix Windows console encoding for Unicode player names
+if sys.platform == "win32":
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -18,9 +25,20 @@ from sqlalchemy.pool import QueuePool
 load_dotenv(".env.local")
 load_dotenv()
 
-MODEL_NAME = "openai/gpt-oss-120b"
+MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+PARSE_POLL_INTERVAL = int(os.getenv("PARSE_POLL_INTERVAL", "3"))
+PARSE_BATCH_SIZE = int(os.getenv("PARSE_BATCH_SIZE", "15"))
+PARSE_WORKERS = int(os.getenv("PARSE_WORKERS", "5"))
+PARSE_RATE_LIMIT = int(os.getenv("PARSE_RATE_LIMIT", "15"))
+PARSE_DB_POOL = int(os.getenv("PARSE_DB_POOL", "10"))
+PARSE_DB_OVERFLOW = int(os.getenv("PARSE_DB_OVERFLOW", "20"))
 
 _rate_limiter = None
+
+
+def log(msg: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [Parser] {msg}", flush=True)
 
 
 def get_db_url() -> str:
@@ -100,6 +118,47 @@ def mark_error(cursor: RealDictCursor, match_id: int, reason: str) -> None:
     print(f"Match {match_id} failed: {reason}")
 
 
+CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", "300"))  # seconds between cleanup runs
+
+
+def cleanup_demo_files(pool) -> int:
+    """Delete demo files for matches that are fully processed (notified).
+
+    Only deletes when:
+      - status = 'notified' (tip sent to player)
+      - tip_sent = true
+      - file_path exists on disk
+
+    Returns the number of files deleted.
+    """
+    conn = pool.connect()
+    deleted = 0
+    try:
+        db_conn = conn.driver_connection
+        with db_conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                select id, file_path
+                from public.matches_to_download
+                where status = 'notified'
+                  and tip_sent = true
+                  and file_path is not null
+                """
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                fpath = row.get("file_path")
+                if fpath and os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                        deleted += 1
+                    except OSError as exc:
+                        log(f"Failed to delete {fpath}: {exc}")
+    finally:
+        conn.close()
+    return deleted
+
+
 def extract_match_id_from_path(file_path: str, fallback_id: int) -> int:
     base_name = os.path.basename(file_path)
     match = re.search(r"(\d+)", base_name)
@@ -173,6 +232,13 @@ def insert_match_row(
         insert into public.matches
         (match_id, map_name, score_t, score_ct, winner, duration, match_date)
         values (%s, %s, %s, %s, %s, %s, %s)
+        on conflict (match_id) do update set
+            map_name = coalesce(excluded.map_name, matches.map_name),
+            score_t = coalesce(excluded.score_t, matches.score_t),
+            score_ct = coalesce(excluded.score_ct, matches.score_ct),
+            winner = coalesce(excluded.winner, matches.winner),
+            duration = coalesce(excluded.duration, matches.duration),
+            match_date = coalesce(excluded.match_date, matches.match_date)
         returning id
         """,
         (
@@ -382,6 +448,25 @@ def parse_stats(
             or normalize_side(entry.get(f"{prefix}TeamName"))
             or normalize_side(entry.get(f"{prefix}TeamSide"))
         )
+
+    def starting_ct_plays_as(round_num: int, mr: int = 12) -> str:
+        """Return the side the 'starting-CT team' is playing on in a given round.
+
+        CS2 uses MR12 (Competitive) or MR8 (Wingman).
+        - Rounds 1..mr           → first half (starting CT stays CT)
+        - Rounds mr+1..mr*2      → second half (starting CT plays T)
+        - Overtime MR3: each OT has two 3-round halves that alternate.
+        """
+        regulation = mr * 2
+        if round_num <= mr:
+            return "CT"
+        elif round_num <= regulation:
+            return "T"
+        else:
+            # Overtime: MR3 (6 rounds per OT, sides swap every 3)
+            ot_round_0 = round_num - regulation - 1  # 0-indexed within OT
+            ot_half = ot_round_0 // 3
+            return "CT" if ot_half % 2 == 0 else "T"
 
     def extract_time_value(entry: Dict[str, Any]) -> float:
         for key in ("tick", "tickNum", "tick_num", "tickNumber", "time", "timeMs"):
@@ -1071,14 +1156,39 @@ def parse_stats(
         max_tick = pd.to_numeric(rounds_df[rounds_end_tick_col], errors="coerce").dropna()
         if not max_tick.empty:
             match_meta["duration"] = float(max_tick.max()) / 128
+    # Determine MR from player count (MR12 competitive, MR8 wingman)
+    _quick_ids: set = set()
+    if attacker_col and not deaths_df.empty:
+        _quick_ids.update(deaths_df[attacker_col].dropna().astype(str).str.strip().tolist())
+    if victim_col and not deaths_df.empty:
+        _quick_ids.update(deaths_df[victim_col].dropna().astype(str).str.strip().tolist())
+    _quick_ids.discard("")
+    mr = 8 if len(_quick_ids) == 4 else 12
+
     score_ct = None
     score_t = None
     winner = None
     winner_col = find_col(rounds_df, ["winner", "winnerSide", "winnerTeam", "winner_team"])
     if winner_col and not rounds_df.empty:
         winner_series = rounds_df[winner_col].map(normalize_side)
-        score_ct = int((winner_series == "CT").sum())
-        score_t = int((winner_series == "T").sum())
+
+        # Compute TEAM-based scores (not side-based)
+        # "score_ct" = score of the team that STARTED on CT side
+        # "score_t"  = score of the team that STARTED on T side
+        team_ct_score = 0
+        team_t_score = 0
+        for rnd_idx, winner_side in enumerate(winner_series):
+            rnd_num = rnd_idx + 1  # 1-indexed
+            if winner_side not in ("CT", "T"):
+                continue
+            ct_team_plays_as = starting_ct_plays_as(rnd_num, mr)
+            if winner_side == ct_team_plays_as:
+                team_ct_score += 1
+            else:
+                team_t_score += 1
+
+        score_ct = team_ct_score
+        score_t = team_t_score
         if score_ct > score_t:
             winner = "CT"
         elif score_t > score_ct:
@@ -1116,8 +1226,8 @@ def parse_stats(
             rounds_local = rounds_local.sort_values(round_end_tick_col)
         rounds_local = rounds_local.reset_index(drop=True)
 
-        ct_running = 0
-        t_running = 0
+        ct_running = 0  # running score of team that STARTED CT
+        t_running = 0   # running score of team that STARTED T
         for index, row in rounds_local.iterrows():
             round_number = parse_int(row.get(total_rounds_col)) if total_rounds_col else None
             if round_number is None:
@@ -1125,10 +1235,13 @@ def parse_stats(
             winner_side = normalize_side(row.get(winner_col)) if winner_col else None
             reason = normalize_reason(row.get(reason_col)) if reason_col else None
 
-            if winner_side == "CT":
-                ct_running += 1
-            elif winner_side == "T":
-                t_running += 1
+            # Use team-based scoring (accounting for halftime side swap)
+            if winner_side in ("CT", "T"):
+                ct_team_plays_as = starting_ct_plays_as(round_number, mr)
+                if winner_side == ct_team_plays_as:
+                    ct_running += 1
+                else:
+                    t_running += 1
 
             rounds_history.append(
                 {
@@ -1216,6 +1329,22 @@ def parse_stats(
             return "CT" if team_map[player_id] == 0 else "T"
         return None
 
+    def resolve_starting_side(player_id: str) -> Optional[str]:
+        """Return the side the player STARTED the match on.
+
+        resolve_team_side() returns the last-recorded side, which is the
+        second-half side when match went past halftime.  We invert it to
+        get the starting side so it aligns with score_ct / score_t
+        (which represent *team* scores, not side scores).
+        """
+        current = resolve_team_side(player_id)
+        if not current:
+            return None
+        # If the match went past halftime the recorded side is second-half
+        if round_count > mr:
+            return "T" if current == "CT" else "CT"
+        return current
+
     if trade_col and attacker_col and not deaths_df.empty:
         trade_flags = deaths_df[trade_col].astype(bool)
         for attacker_id, is_trade in zip(
@@ -1255,6 +1384,17 @@ def parse_stats(
         player_ids.update(hurts_df[dmg_attacker_col].dropna().astype(str).str.strip().tolist())
     player_ids = {pid for pid in player_ids if pid}
 
+    player_count = len(player_ids)
+    team_size = player_count // 2 if player_count and player_count % 2 == 0 else None
+    if player_count == 4:
+        game_mode = "Wingman"
+    elif player_count == 10:
+        game_mode = "Competitive"
+    elif player_count == 6:
+        game_mode = "Short-handed"
+    else:
+        game_mode = "Unknown"
+
     assists_col = find_col(
         deaths_df,
         ["assister_steamid", "assisterSteamID", "assister_steam_id", "assister"],
@@ -1282,7 +1422,7 @@ def parse_stats(
         deaths_total = 0
         assists_total = 0
         headshots_total = 0
-        team_side = resolve_team_side(player_id)
+        team_side = resolve_starting_side(player_id)
         if attacker_col and not deaths_df.empty:
             kills_total = int(
                 (deaths_df[attacker_col].astype(str).str.strip() == player_id).sum()
@@ -1324,27 +1464,6 @@ def parse_stats(
             }
         )
 
-    player_ids = set()
-    if attacker_col and not deaths_df.empty:
-        player_ids.update(
-            deaths_df[attacker_col].dropna().astype(str).str.strip().tolist()
-        )
-    if victim_col and not deaths_df.empty:
-        player_ids.update(
-            deaths_df[victim_col].dropna().astype(str).str.strip().tolist()
-        )
-    player_ids = {pid for pid in player_ids if pid}
-    player_count = len(player_ids)
-    team_size = player_count // 2 if player_count and player_count % 2 == 0 else None
-    if player_count == 4:
-        game_mode = "Wingman"
-    elif player_count == 10:
-        game_mode = "Competitive"
-    elif player_count == 6:
-        game_mode = "Short-handed"
-    else:
-        game_mode = "Unknown"
-
     buy_summary: Dict[str, Any] = {}
     if not purchases_with_round.empty:
         item_col = find_col(
@@ -1379,6 +1498,34 @@ def parse_stats(
                     buy_counts[team_value][buy_type] = buy_counts[team_value].get(buy_type, 0) + 1
             buy_summary = buy_counts
 
+    # ── Determine user's STARTING side (first half) ──
+    # resolve_team_side returns the last-recorded side which is the second-half
+    # side.  We need the starting side so it aligns with score_ct / score_t.
+    user_starting_side: Optional[str] = None
+    if target_steam_id:
+        # Strategy 1: Look at kill events in the first mr rounds
+        for rnd_idx, round_data in enumerate(rounds):
+            if rnd_idx >= mr:  # only first half
+                break
+            for kill in (round_data.get("kills", []) or []):
+                attacker_id = normalize_id(kill.get("attackerSteamID"))
+                victim_id = normalize_id(kill.get("victimSteamID"))
+                if attacker_id == target_steam_id:
+                    side = extract_side(kill, "attacker")
+                    if side in ("CT", "T"):
+                        user_starting_side = side
+                        break
+                if victim_id == target_steam_id:
+                    side = extract_side(kill, "victim")
+                    if side in ("CT", "T"):
+                        user_starting_side = side
+                        break
+            if user_starting_side:
+                break
+        # Strategy 2: Use resolve_starting_side (inverts second-half side when needed)
+        if not user_starting_side:
+            user_starting_side = resolve_starting_side(target_steam_id)
+
     return {
         "kills": kills,
         "deaths": deaths,
@@ -1409,6 +1556,11 @@ def parse_stats(
         "match_meta": match_meta,
         "players_stats": player_stats,
         "rounds": rounds_history,
+        "user_team_side": user_starting_side,
+        "score_ct": score_ct,
+        "score_t": score_t,
+        "winner": winner,
+        "map_name": match_meta.get("map_name"),
     }
 
 
@@ -1424,6 +1576,7 @@ def get_ai_coaching_tip(
 
     client = Groq(api_key=api_key)
 
+    # ── Extract all available data from parsed stats ──
     opening_win_rate = stats.get("opening_win_rate")
     ct_kd = stats.get("ct_kd")
     t_kd = stats.get("t_kd")
@@ -1441,63 +1594,113 @@ def get_ai_coaching_tip(
     median_death_time_sec = stats.get("median_death_time_sec")
     avg_death_distance = stats.get("avg_death_distance")
     buy_summary = stats.get("buy_summary") or {}
+    user_team_side = stats.get("user_team_side")
+    score_ct = stats.get("score_ct")
+    score_t = stats.get("score_t")
+    winner = stats.get("winner")
+    map_name = stats.get("map_name")
+    players_stats = stats.get("players_stats") or []
+
     if team_size:
         opening_advantage = f"{team_size}v{team_size - 1}"
     else:
         opening_advantage = "man advantage"
 
+    # Determine match result for the user
+    match_result = "Unknown"
+    if user_team_side and winner:
+        if winner == "Tie":
+            match_result = "Tie"
+        elif winner == user_team_side:
+            match_result = "Win"
+        else:
+            match_result = "Loss"
+
+    user_score = None
+    enemy_score = None
+    if user_team_side and score_ct is not None and score_t is not None:
+        if user_team_side == "CT":
+            user_score = score_ct
+            enemy_score = score_t
+        else:
+            user_score = score_t
+            enemy_score = score_ct
+
+    # ── Build comprehensive stats block ──
     stats_lines = [
-        f"Overall K/D: {stats['kd_ratio']}",
-        f"ADR: {stats['adr']}",
-        f"Opening Duel Win Rate: {opening_win_rate}% (opening kill creates a {opening_advantage})",
-        f"Kills: {stats['kills']}",
-        f"Deaths: {stats['deaths']}",
-        f"CT K/D: {ct_kd if ct_kd is not None else 'N/A'}",
-        f"T K/D: {t_kd if t_kd is not None else 'N/A'}",
+        f"Match Result: {match_result}",
     ]
-    if ct_kills is not None and t_kills is not None:
-        stats_lines.extend([f"CT Kills: {ct_kills}", f"T Kills: {t_kills}"])
-    if ct_deaths is not None and t_deaths is not None:
-        stats_lines.extend([f"CT Deaths: {ct_deaths}", f"T Deaths: {t_deaths}"])
+    if user_score is not None and enemy_score is not None:
+        stats_lines.append(f"Final Score: {user_score}-{enemy_score} (player's perspective)")
+    if map_name:
+        stats_lines.append(f"Map: {map_name}")
     if game_mode:
         mode_line = f"Game mode: {game_mode}"
         if team_size:
             mode_line += f" ({team_size}v{team_size})"
         stats_lines.append(mode_line)
+    if user_team_side:
+        stats_lines.append(f"Player's starting side: {user_team_side}")
+    stats_lines.extend([
+        f"Overall K/D: {stats['kd_ratio']}",
+        f"ADR: {stats['adr']}",
+        f"HS%: {stats['hs_percent']}%",
+        f"Opening Duel Win Rate: {opening_win_rate}% (opening kill creates a {opening_advantage})",
+        f"Opening Kills: {stats.get('opening_kills', 0)}",
+        f"Opening Deaths: {stats.get('opening_deaths', 0)}",
+        f"Kills: {stats['kills']}",
+        f"Deaths: {stats['deaths']}",
+        f"CT K/D: {ct_kd if ct_kd is not None else 'N/A'}",
+        f"T K/D: {t_kd if t_kd is not None else 'N/A'}",
+    ])
+    if ct_kills is not None and t_kills is not None:
+        stats_lines.extend([f"CT Kills: {ct_kills}", f"T Kills: {t_kills}"])
+    if ct_deaths is not None and t_deaths is not None:
+        stats_lines.extend([f"CT Deaths: {ct_deaths}", f"T Deaths: {t_deaths}"])
     if top_death_rounds:
         rounds_list = ", ".join(str(value) for value in top_death_rounds)
-        stats_lines.append(f"Common death rounds (index): {rounds_list}")
+        stats_lines.append(f"Rounds with most deaths: {rounds_list}")
     if common_death_weapon:
-        stats_lines.append(f"Common death weapon: {common_death_weapon}")
+        stats_lines.append(f"Most killed by weapon: {common_death_weapon}")
     if death_headshot_rate is not None:
-        stats_lines.append(f"Death headshot rate: {death_headshot_rate}%")
+        stats_lines.append(f"Death headshot rate (killed by HS): {death_headshot_rate}%")
     stats_lines.append(f"Most used weapon: {fav_weapon if fav_weapon else 'unknown'}")
 
+    # ── Teammate/enemy scoreboard context ──
+    teammates = []
+    enemies = []
+    for p in players_stats:
+        line = f"{p.get('player_name') or p.get('steam_id')}: K{p.get('kills',0)}/D{p.get('deaths',0)}/A{p.get('assists',0)} ADR:{p.get('adr',0)} HS:{p.get('hs_percent',0)}%"
+        if user_team_side and p.get("team_side") == user_team_side:
+            teammates.append(line)
+        else:
+            enemies.append(line)
+
+    if teammates:
+        stats_lines.append("\nTeammates:")
+        stats_lines.extend(f"  - {t}" for t in teammates)
+    if enemies:
+        stats_lines.append("Opponents:")
+        stats_lines.extend(f"  - {e}" for e in enemies)
+
+    # ── Extra contextual facts ──
     facts_lines = []
-    if top_death_rounds:
-        facts_lines.append(
-            f"Death rounds (index): {', '.join(str(value) for value in top_death_rounds)}"
-        )
-    if common_death_weapon:
-        facts_lines.append(f"Common death weapon: {common_death_weapon}")
-    if death_headshot_rate is not None:
-        facts_lines.append(f"Death headshot rate: {death_headshot_rate}%")
     if avg_death_time_sec is not None:
-        facts_lines.append(f"Avg death time: {avg_death_time_sec}s")
+        facts_lines.append(f"Avg death time into round: {avg_death_time_sec}s")
     if median_death_time_sec is not None:
-        facts_lines.append(f"Median death time: {median_death_time_sec}s")
+        facts_lines.append(f"Median death time into round: {median_death_time_sec}s")
     if avg_death_distance is not None:
-        facts_lines.append(f"Avg death distance: {avg_death_distance}m")
+        facts_lines.append(f"Avg death distance: {avg_death_distance} units")
     if buy_summary:
         ct_buy = buy_summary.get("CT", {})
         t_buy = buy_summary.get("T", {})
         if ct_buy:
             facts_lines.append(
-                "CT buy mix: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
+                "CT economy rounds: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
             )
         if t_buy:
             facts_lines.append(
-                "T buy mix: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
+                "T economy rounds: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
             )
 
     style_value = (style or "narrative").strip().lower()
@@ -1536,15 +1739,19 @@ def get_ai_coaching_tip(
         language_prompt = "Output the entire response in English."
 
     prompt = (
-        "You are a CS2 coach writing a Steam chat message. "
-        "Do not guess about economy or round type; if data is unavailable, say it is unavailable. "
+        "You are a CS2 coach analyzing a real match demo. "
+        "All the stats below are extracted directly from the demo file — they are accurate. "
+        "Reference specific numbers from the data (K/D, ADR, HS%, opening duels, scores). "
+        "Compare the player's performance to their teammates and opponents when relevant. "
+        "If the player lost, focus on what they can improve. If they won, highlight what worked and what could be even better. "
+        "Do not guess about economy or round type; only reference data that is provided. "
         "No markdown headers like ###. Use bold sparingly for key numbers/phrases. "
         + style_prompt
         + " "
         + language_prompt
-        + "\n\nUse these stats:\n"
+        + "\n\nMatch Stats (from demo):\n"
         + "\n".join(stats_lines)
-        + ("\n\nFacts:\n- " + "\n- ".join(facts_lines) if facts_lines else "")
+        + ("\n\nAdditional Facts:\n- " + "\n- ".join(facts_lines) if facts_lines else "")
     )
 
     try:
@@ -1630,12 +1837,14 @@ def main() -> None:
 
     pool = QueuePool(
         lambda: psycopg2.connect(db_url),
-        pool_size=10,
-        max_overflow=20,
+        pool_size=PARSE_DB_POOL,
+        max_overflow=PARSE_DB_OVERFLOW,
     )
-    set_rate_limiter(RateLimiter(max_calls=15, period_seconds=60))
+    set_rate_limiter(RateLimiter(max_calls=PARSE_RATE_LIMIT, period_seconds=60))
 
+    # Single match mode (triggered by replay_downloader)
     if match_id is not None:
+        log(f"Parsing single match {match_id}...")
         conn = pool.connect()
         try:
             db_conn = conn.driver_connection
@@ -1644,52 +1853,83 @@ def main() -> None:
         finally:
             conn.close()
         if not matches:
-            print("No matches to parse.")
+            log("No matches to parse.")
             return
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as executor:
             futures = [executor.submit(parse_match_logic, match, pool) for match in matches]
             for future in as_completed(futures):
                 match_id_value, success, reason = future.result()
                 if success:
-                    print(f"Saved coach tip for match {match_id_value}.")
+                    log(f"Saved coach tip for match {match_id_value}.")
                 else:
-                    print(f"Match {match_id_value} failed: {reason}")
+                    log(f"Match {match_id_value} failed: {reason}")
         return
 
+    # Daemon mode — run forever
+    log("=" * 50)
+    log("Demo Parser daemon started")
+    log(f"  Model          : {MODEL_NAME}")
+    log(f"  Workers        : {PARSE_WORKERS}")
+    log(f"  Batch size     : {PARSE_BATCH_SIZE}")
+    log(f"  Rate limit     : {PARSE_RATE_LIMIT} calls/60s")
+    log(f"  DB pool        : {PARSE_DB_POOL} + {PARSE_DB_OVERFLOW} overflow")
+    log(f"  Poll interval  : {PARSE_POLL_INTERVAL}s")
+    log(f"  Cleanup interval: {CLEANUP_INTERVAL}s")
+    log(f"  Waiting for downloaded demos...")
+    log("=" * 50)
+
+    last_cleanup = 0.0
     while True:
-        conn = pool.connect()
         try:
-            db_conn = conn.driver_connection
-            with db_conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                matches = fetch_matches(cursor, None, limit=10)
-        finally:
-            conn.close()
+            conn = pool.connect()
+            try:
+                db_conn = conn.driver_connection
+                with db_conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    matches = fetch_matches(cursor, None, limit=PARSE_BATCH_SIZE)
+            finally:
+                conn.close()
 
-        if not matches:
-            time.sleep(3)
-            continue
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(parse_match_logic, match, pool) for match in matches]
-            quota_hit = False
-            retry_after = None
-            for future in as_completed(futures):
-                match_id_value, success, reason = future.result()
-                if success:
-                    print(f"Saved coach tip for match {match_id_value}.")
-                else:
-                    print(f"Match {match_id_value} failed: {reason}")
-                    if reason and str(reason).startswith("QUOTA_EXCEEDED::"):
-                        quota_hit = True
-                        retry_after = parse_retry_after_seconds(Exception(str(reason)))
-
-            if quota_hit:
-                sleep_seconds = retry_after or 45
-                print(f"Quota exceeded. Sleeping for {sleep_seconds}s before retrying.")
-                time.sleep(sleep_seconds)
+            if not matches:
+                time.sleep(PARSE_POLL_INTERVAL)
                 continue
 
-        time.sleep(2)
+            log(f"Found {len(matches)} match(es) to parse.")
+
+            with ThreadPoolExecutor(max_workers=PARSE_WORKERS) as executor:
+                futures = [executor.submit(parse_match_logic, match, pool) for match in matches]
+                quota_hit = False
+                retry_after = None
+                for future in as_completed(futures):
+                    match_id_value, success, reason = future.result()
+                    if success:
+                        log(f"Saved coach tip for match {match_id_value}.")
+                    else:
+                        log(f"Match {match_id_value} failed: {reason}")
+                        if reason and str(reason).startswith("QUOTA_EXCEEDED::"):
+                            quota_hit = True
+                            retry_after = parse_retry_after_seconds(Exception(str(reason)))
+
+                if quota_hit:
+                    sleep_seconds = retry_after or 45
+                    log(f"Quota exceeded. Sleeping {sleep_seconds}s...")
+                    time.sleep(sleep_seconds)
+                    continue
+
+        except Exception as exc:
+            log(f"Parse cycle error: {exc}")
+
+        # Periodically clean up demo files that are fully processed
+        now = time.time()
+        if now - last_cleanup >= CLEANUP_INTERVAL:
+            try:
+                cleaned = cleanup_demo_files(pool)
+                if cleaned:
+                    log(f"Cleaned up {cleaned} demo file(s).")
+            except Exception as exc:
+                log(f"Cleanup error: {exc}")
+            last_cleanup = now
+
+        time.sleep(PARSE_POLL_INTERVAL)
 
 
 if __name__ == "__main__":

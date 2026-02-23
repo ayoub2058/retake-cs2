@@ -231,10 +231,10 @@ export function PlayerStats({ userId }: PlayerStatsProps) {
   };
 
   return (
-    <div className="rounded-3xl glass-card p-8">
+    <div className="rounded-3xl glass-card p-8 animate-fade-in">
       <div className="flex flex-wrap items-center justify-between gap-6">
         <div className="flex items-center gap-4">
-          <div className="h-14 w-14 overflow-hidden rounded-2xl border border-white/20 bg-black/40">
+          <div className="h-14 w-14 overflow-hidden rounded-2xl border border-white/10 bg-black/50 shadow-lg">
             {avatarUrl ? (
               <img
                 src={avatarUrl}
@@ -242,36 +242,40 @@ export function PlayerStats({ userId }: PlayerStatsProps) {
                 className="h-full w-full object-cover"
               />
             ) : (
-              <div className="flex h-full w-full items-center justify-center text-xs text-white/60">
+              <div className="flex h-full w-full items-center justify-center text-xs text-white/40">
                 {t("naLabel")}
               </div>
             )}
           </div>
           <div>
-            <p className="text-xs uppercase tracking-[0.35em] text-[#67f5ff]">
+            <p className="text-[10px] uppercase tracking-[0.4em] text-[#67f5ff]">
               {t("lifetimeSummary")}
             </p>
-            <h2 className="mt-2 text-2xl font-semibold">{t("yourPerformance")}</h2>
-            <p className="mt-1 text-sm text-white/60">
-              {t("avgKD")} {summary.kd.toFixed(2)} · {t("avgADR")}{" "}
-              {summary.avgAdr.toFixed(1)} · {t("winRate")}{" "}
-              <span
-                className={
-                  summary.winRatePercent === null
-                    ? "text-white/60"
-                    : summary.winRatePercent > 50
-                      ? "text-emerald-400"
-                      : summary.winRatePercent < 50
-                        ? "text-rose-400"
-                        : "text-white/80"
-                }
-              >
-                {summary.winRate}
+            <h2 className="mt-2 text-2xl font-bold">{t("yourPerformance")}</h2>
+            <div className="mt-1.5 flex flex-wrap items-center gap-3 text-sm text-white/50">
+              <span>{t("avgKD")} <strong className="text-white">{summary.kd.toFixed(2)}</strong></span>
+              <span className="text-white/20">|</span>
+              <span>{t("avgADR")} <strong className="text-white">{summary.avgAdr.toFixed(1)}</strong></span>
+              <span className="text-white/20">|</span>
+              <span>{t("winRate")}{" "}
+                <strong
+                  className={
+                    summary.winRatePercent === null
+                      ? "text-white/60"
+                      : summary.winRatePercent > 50
+                        ? "text-emerald-400"
+                        : summary.winRatePercent < 50
+                          ? "text-rose-400"
+                          : "text-white/80"
+                  }
+                >
+                  {summary.winRate}
+                </strong>
               </span>
-            </p>
+            </div>
           </div>
         </div>
-        <div className="rounded-2xl border border-white/10 bg-black/40 px-4 py-3 text-xs text-white/60">
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-4 py-2.5 text-xs text-white/40">
           {isLoading
             ? t("loadingStats")
             : t("lastMatches", { count: stats.length })}

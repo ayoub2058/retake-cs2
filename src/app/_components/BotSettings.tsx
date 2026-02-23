@@ -85,13 +85,13 @@ export function BotSettings({ userId }: BotSettingsProps) {
   };
 
   return (
-    <div className="rounded-3xl glass-card p-8">
+    <div className="rounded-3xl glass-card p-8 animate-fade-in">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.35em] text-[#d5ff4c]">
+          <p className="text-[10px] uppercase tracking-[0.4em] text-[#d5ff4c]">
             {t("coachSettings")}
           </p>
-          <h2 className="mt-3 text-2xl font-semibold text-white">
+          <h2 className="mt-3 text-2xl font-bold text-white">
             {t("customizeCoach")}
           </h2>
         </div>
@@ -99,14 +99,14 @@ export function BotSettings({ userId }: BotSettingsProps) {
           href="https://steamcommunity.com/profiles/76561199559179562/"
           target="_blank"
           rel="noreferrer"
-          className="rounded-full border border-white/20 bg-white/10 px-5 py-2 text-sm font-semibold text-white transition hover:border-white/60 hover:bg-white/20"
+          className="group rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 text-sm font-semibold text-white transition-all hover:border-white/20 hover:bg-white/[0.08]"
         >
-          <span className="flex items-center gap-2">
-            <span className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/20 bg-white/10">
+          <span className="flex items-center gap-3">
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06] transition group-hover:border-white/20">
               <img
                 src="/images/Steam_(service)-Logo.wine.svg"
                 alt="Steam"
-                className="h-6 w-6"
+                className="h-5 w-5"
               />
             </span>
             {t("addBot")}
@@ -116,7 +116,7 @@ export function BotSettings({ userId }: BotSettingsProps) {
 
       <div className="mt-8 grid gap-6 md:grid-cols-2">
         <div className="space-y-2">
-          <div className="text-[10px] uppercase tracking-[0.35em] text-white/50">
+          <div className="text-[10px] uppercase tracking-[0.35em] text-white/40">
             {t("languageLabel")}
           </div>
           <div className="lang-select-shell">
@@ -136,7 +136,7 @@ export function BotSettings({ userId }: BotSettingsProps) {
         </div>
 
         <div className="space-y-2">
-          <div className="text-[10px] uppercase tracking-[0.35em] text-white/50">
+          <div className="text-[10px] uppercase tracking-[0.35em] text-white/40">
             {t("coachStyle")}
           </div>
           <div className="lang-select-shell">
@@ -156,8 +156,8 @@ export function BotSettings({ userId }: BotSettingsProps) {
         </div>
       </div>
 
-      <div className="mt-8 flex items-center justify-between">
-        <p className="text-sm text-white/60">
+      <div className="mt-8 flex items-center justify-between rounded-xl border border-white/[0.04] bg-white/[0.02] px-5 py-4">
+        <p className="text-sm text-white/50">
           {isLoading
             ? t("loadingSettings")
             : t("preferencesSaved")}
@@ -166,7 +166,7 @@ export function BotSettings({ userId }: BotSettingsProps) {
           type="button"
           onClick={handleSave}
           disabled={isSaving || isLoading}
-          className="rounded-full bg-[#d5ff4c] px-6 py-2 text-sm font-semibold text-black transition hover:bg-[#c4f03c] disabled:cursor-not-allowed disabled:opacity-60"
+          className="rounded-lg bg-[#d5ff4c] px-6 py-2.5 text-sm font-bold text-black transition-all hover:bg-[#c4f03c] hover:shadow-[0_0_20px_rgba(213,255,76,0.25)] disabled:cursor-not-allowed disabled:opacity-40"
         >
           {isSaving ? t("saving") : t("saveSettings")}
         </button>

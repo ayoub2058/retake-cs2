@@ -109,22 +109,22 @@ export function WinRate({ userId, limit = 20 }: WinRateProps) {
   }, [matchWinnersById, stats]);
 
   return (
-    <div className="rounded-3xl glass-card p-6">
-      <p className="text-xs uppercase tracking-[0.35em] text-[#7dd3fc]">{t("winRate")}</p>
-      <div className="mt-3 flex items-end justify-between">
-        <div className="text-3xl font-semibold">
+    <div className="rounded-3xl glass-card p-6 animate-fade-in">
+      <p className="text-[10px] uppercase tracking-[0.4em] text-[#7dd3fc]">{t("winRate")}</p>
+      <div className="mt-4 flex items-end justify-between">
+        <div className="text-4xl font-bold animate-count-up">
           {isLoading ? "..." : summary.winRate}
         </div>
         <div
           className={
-            "text-sm" +
+            "text-sm font-medium" +
             (summary.winRatePercent === null
-              ? " text-white/40"
+              ? " text-white/30"
               : summary.winRatePercent > 50
                 ? " text-emerald-400"
                 : summary.winRatePercent < 50
                   ? " text-rose-400"
-                  : " text-white/60")
+                  : " text-white/50")
           }
         >
           {summary.winRatePercent === null

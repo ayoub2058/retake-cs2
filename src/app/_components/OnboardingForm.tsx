@@ -22,7 +22,7 @@ const SubmitButton = () => {
   return (
     <button
       type="submit"
-      className="mt-4 w-full rounded-md bg-[#d5ff4c] px-6 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-black transition hover:bg-[#c1eb3d] disabled:cursor-not-allowed disabled:opacity-60"
+      className="mt-6 w-full rounded-xl bg-[#d5ff4c] px-6 py-4 text-sm font-bold uppercase tracking-[0.15em] text-black transition-all hover:bg-[#c1eb3d] hover:shadow-[0_0_25px_rgba(213,255,76,0.25)] disabled:cursor-not-allowed disabled:opacity-40"
       disabled={pending}
     >
       {pending ? t("savingCode") : t("saveCode")}
@@ -35,55 +35,73 @@ export const OnboardingForm = ({ action, username, helpUrl }: OnboardingFormProp
   const [state, formAction] = useFormState(action, initialState);
 
   return (
-    <div className="w-full max-w-xl rounded-2xl glass-card p-8">
-      <div className="mb-6">
-        <p className="text-xs uppercase tracking-[0.35em] text-[#d5ff4c]">
-          {t("secureMatchTracking")}
-        </p>
-        <h1 className="mt-3 text-3xl font-semibold text-white">
+    <div className="w-full max-w-xl rounded-3xl glass-card p-10">
+      <div className="mb-8">
+        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-[#d5ff4c]/20 bg-[#d5ff4c]/5 px-4 py-1.5">
+          <span className="text-[10px] uppercase tracking-[0.3em] text-[#d5ff4c]">
+            {t("secureMatchTracking")}
+          </span>
+        </div>
+        <h1 className="text-3xl font-bold text-white">
           {t("oneLastStep", { username })}
         </h1>
-        <p className="mt-3 text-sm text-zinc-300">
+        <p className="mt-3 text-sm leading-relaxed text-white/50">
           {t("trackMatchesDescription")}
         </p>
       </div>
 
-      <form action={formAction} className="space-y-3">
-        <label className="block text-xs uppercase tracking-[0.25em] text-zinc-400">
-          {t("gameAuthCode")}
-        </label>
-        <input
-          name="auth_code"
-          placeholder="AAAA-AAAAA-AAAA"
-          className="w-full rounded-md border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none ring-1 ring-transparent transition focus:border-[#d5ff4c] focus:ring-[#d5ff4c]"
-          autoComplete="off"
-          inputMode="text"
-          pattern="[A-Za-z0-9]{4}-[A-Za-z0-9]{5}-[A-Za-z0-9]{4}"
-          title="Format: AAAA-AAAAA-AAAA"
-          required
-        />
-        <label className="mt-4 block text-xs uppercase tracking-[0.25em] text-zinc-400">
-          {t("matchToken")}
-        </label>
-        <input
-          name="last_known_match_code"
-          placeholder="CSGO-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
-          className="w-full rounded-md border border-white/10 bg-black/40 px-4 py-3 text-sm text-white outline-none ring-1 ring-transparent transition focus:border-[#d5ff4c] focus:ring-[#d5ff4c]"
-          autoComplete="off"
-          inputMode="text"
-          pattern="CSGO-[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}"
-          title="Format: CSGO-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
-          required
-        />
+      <form action={formAction} className="space-y-5">
+        <div>
+          <label className="mb-2 block text-[10px] uppercase tracking-[0.3em] text-white/40">
+            {t("gameAuthCode")}
+          </label>
+          <input
+            name="auth_code"
+            placeholder="AAAA-AAAAA-AAAA"
+            className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-4 py-3.5 text-sm text-white outline-none ring-1 ring-transparent transition-all focus:border-[#d5ff4c]/50 focus:ring-[#d5ff4c]/30 focus:shadow-[0_0_15px_rgba(213,255,76,0.1)] placeholder:text-white/20"
+            autoComplete="off"
+            inputMode="text"
+            pattern="[A-Za-z0-9]{4}-[A-Za-z0-9]{5}-[A-Za-z0-9]{4}"
+            title="Format: AAAA-AAAAA-AAAA"
+            required
+          />
+        </div>
+        <div>
+          <label className="mb-2 block text-[10px] uppercase tracking-[0.3em] text-white/40">
+            {t("matchToken")}
+          </label>
+          <input
+            name="last_known_match_code"
+            placeholder="CSGO-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
+            className="w-full rounded-xl border border-white/[0.08] bg-black/50 px-4 py-3.5 text-sm text-white outline-none ring-1 ring-transparent transition-all focus:border-[#d5ff4c]/50 focus:ring-[#d5ff4c]/30 focus:shadow-[0_0_15px_rgba(213,255,76,0.1)] placeholder:text-white/20"
+            autoComplete="off"
+            inputMode="text"
+            pattern="CSGO-[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}"
+            title="Format: CSGO-AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"
+            required
+          />
+        </div>
         {state.error ? (
-          <p className="text-sm text-red-400">{state.error}</p>
+          <div className="flex items-center gap-2 rounded-lg border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-sm text-rose-300">
+            <svg className="h-4 w-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            {state.error}
+          </div>
         ) : null}
         <a
           href={helpUrl}
-          className="inline-flex items-center text-xs uppercase tracking-[0.2em] text-zinc-400 transition hover:text-white"
+          className="inline-flex items-center gap-1 text-xs uppercase tracking-[0.2em] text-white/40 transition hover:text-[#67f5ff]"
           target="_blank"
           rel="noreferrer"
         >
+          <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
           {t("getCodeHere")}
         </a>
         <SubmitButton />

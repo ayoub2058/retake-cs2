@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getSteamSessionFromCookies } from "@/lib/steamSessionServer";
 
 type SteamPlayer = {
   id: string;
@@ -44,6 +45,11 @@ const fetchJson = async (url: string) => {
 };
 
 export async function GET(request: NextRequest) {
+  const session = await getSteamSessionFromCookies();
+  if (!session) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim();
   if (!query) {

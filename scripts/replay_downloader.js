@@ -4,6 +4,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const { pipeline } = require("stream/promises");
+const { spawn } = require("child_process");
 const SteamUser = require("steam-user");
 const SteamTotp = require("steam-totp");
 const GlobalOffensive = require("globaloffensive");
@@ -15,6 +16,15 @@ dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 const POLL_INTERVAL_MS = 30_000;
+const GC_RECONNECT_DELAY_MS = 15_000;
+const MAX_CONCURRENT_DOWNLOADS = Number.parseInt(
+  process.env.MAX_CONCURRENT_DOWNLOADS || "3",
+  10
+);
+const MAX_CONCURRENT_PARSES = Number.parseInt(
+  process.env.MAX_CONCURRENT_PARSES || "2",
+  10
+);
 const RETRY_COOLDOWN_MS = Number.parseInt(
   process.env.RETRY_COOLDOWN_MS || "300000",
   10
@@ -24,6 +34,11 @@ const DOWNLOAD_TIMEOUT_MS = Number.parseInt(
   10
 );
 const APP_ID_CS2 = 730;
+
+const log = (prefix, msg) => {
+  const ts = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  console.log(`[${ts}] [${prefix}] ${msg}`);
+};
 
 const dbUrl =
   process.env.SUPABASE_DB_URL ||
@@ -45,26 +60,29 @@ if (!steamUser || !steamPass || !steamSharedSecret) {
   );
 }
 
-const pool = new Pool({ connectionString: dbUrl });
+const pool = new Pool({ connectionString: dbUrl, max: 20 });
 const client = new SteamUser();
 const csgo = new GlobalOffensive(client);
 
 const downloadsDir = path.join(process.cwd(), "downloads");
 
-let isProcessing = false;
+let activeDownloads = 0;
 let gcReady = false;
 let isSendingTips = false;
 let steamReady = false;
 let friendsReady = false;
 let downloadPollerStarted = false;
 let messagePollerStarted = false;
+let loginAttempts = 0;
+let activeParses = 0;
+const MAX_LOGIN_ATTEMPTS = 5;
 const retryAfterByMatchId = new Map();
 
 const ensureDownloadsDir = async () => {
   await fsp.mkdir(downloadsDir, { recursive: true });
 };
 
-const getPendingMatch = async () => {
+const getPendingMatches = async (limit) => {
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
@@ -72,15 +90,10 @@ const getPendingMatch = async () => {
       `
       with pending as (
         select id, share_code, user_id
-        from public.matches_to_download m
+        from public.matches_to_download
         where status = 'pending'
-          and id = (
-            select max(id)
-            from public.matches_to_download m2
-            where m2.user_id = m.user_id
-          )
         order by id desc
-        limit 1
+        limit $1
         for update skip locked
       )
       select
@@ -90,25 +103,26 @@ const getPendingMatch = async () => {
         coalesce(u.steam_id::text, pending.user_id::text) as user_steam_id
       from pending
       left join public.users u on u.steam_id::text = pending.user_id::text
-      `
+      `,
+      [limit]
     );
 
     if (result.rowCount === 0) {
       await db.query("COMMIT");
-      return null;
+      return [];
     }
 
-    const row = result.rows[0];
+    const ids = result.rows.map((r) => r.id);
     await db.query(
       `
       update public.matches_to_download
       set status = 'processing'
-      where id = $1
+      where id = ANY($1)
       `,
-      [row.id]
+      [ids]
     );
     await db.query("COMMIT");
-    return row;
+    return result.rows;
   } catch (error) {
     await db.query("ROLLBACK");
     throw error;
@@ -152,8 +166,13 @@ const markPending = async (id) => {
 
 const requestMatch = (shareCode) =>
   new Promise((resolve, reject) => {
+    if (!gcReady) {
+      return reject(new Error("Game Coordinator not ready"));
+    }
+
     const timeout = setTimeout(() => {
-      reject(new Error("Timed out waiting for matchList"));
+      csgo.removeListener("matchList", handler);
+      reject(new Error("Timed out waiting for matchList (20s)"));
     }, 20_000);
 
     const handler = (matchList) => {
@@ -417,75 +436,129 @@ const sendPendingMessages = async () => {
   }
 };
 
-const processPending = async () => {
-  if (isProcessing || !gcReady) {
+const processOneMatch = async (row) => {
+  const retryAfter = retryAfterByMatchId.get(row.id);
+  if (retryAfter && Date.now() < retryAfter) {
+    await markPending(row.id);
     return;
   }
 
-  isProcessing = true;
-  let currentRow = null;
+  const shareCode = row.share_code;
+
+  // GC request is serialized (Valve limitation) — await in sequence
+  const matchList = await requestMatch(shareCode);
+  const replayUrl = findReplayUrl(matchList);
+
+  if (!replayUrl) {
+    log("DL", `Replay URL missing for share code ${shareCode}`);
+    await markPending(row.id);
+    return;
+  }
+
+  await ensureDownloadsDir();
+  const outputFile = path.join(downloadsDir, `match_${row.id}.dem`);
+  await downloadReplay(replayUrl, outputFile);
+
+  await markDownloaded(row.id, outputFile);
+  log("DL", `Downloaded ${shareCode} → ${outputFile}`);
+  await sendDownloadMessage(row.user_steam_id, row.id);
+
+  // Auto-trigger demo parsing in background (throttled)
+  triggerParse(row.id);
+};
+
+const processPending = async () => {
+  if (!gcReady) {
+    return;
+  }
+
+  const slotsAvailable = MAX_CONCURRENT_DOWNLOADS - activeDownloads;
+  if (slotsAvailable <= 0) {
+    return;
+  }
+
+  let rows;
   try {
-    const row = await getPendingMatch();
-    if (!row) {
-      return;
-    }
-
-    currentRow = row;
-
-    const retryAfter = retryAfterByMatchId.get(row.id);
-    if (retryAfter && Date.now() < retryAfter) {
-      await markPending(row.id);
-      return;
-    }
-
-    const shareCode = row.share_code;
-    const matchList = await requestMatch(shareCode);
-    const replayUrl = findReplayUrl(matchList);
-
-    if (!replayUrl) {
-      console.log(
-        "🔍 FULL VALVE RESPONSE:",
-        JSON.stringify(matchList, null, 2)
-      );
-      console.log(`Replay URL missing for share code ${shareCode}`);
-      await markPending(row.id);
-      return;
-    }
-
-    await ensureDownloadsDir();
-    const outputFile = path.join(downloadsDir, `match_${row.id}.dem`);
-    await downloadReplay(replayUrl, outputFile);
-
-    await markDownloaded(row.id, outputFile);
-    console.log(`Downloaded ${shareCode} to ${outputFile}`);
-    await sendDownloadMessage(row.user_steam_id, row.id);
+    rows = await getPendingMatches(slotsAvailable);
   } catch (error) {
-    console.error("Replay downloader error:", error);
-    if (typeof error?.message === "string") {
-      console.error(error.message);
-    }
-    if (currentRow) {
-      try {
+    log("DL", `Failed to fetch pending matches: ${error.message}`);
+    return;
+  }
+
+  if (!rows.length) {
+    return;
+  }
+
+  log("DL", `Processing ${rows.length} match(es) (${activeDownloads} active)...`);
+
+  for (const row of rows) {
+    activeDownloads += 1;
+    processOneMatch(row)
+      .catch((error) => {
+        console.error("Replay downloader error:", error);
         const message = typeof error?.message === "string" ? error.message : "";
         if (message.includes("Replay download failed: 502")) {
-          retryAfterByMatchId.set(
-            currentRow.id,
-            Date.now() + RETRY_COOLDOWN_MS
-          );
-          await markPending(currentRow.id);
-          console.warn(
-            "Replay CDN returned 502 repeatedly; re-queued for later retry."
-          );
+          retryAfterByMatchId.set(row.id, Date.now() + RETRY_COOLDOWN_MS);
+          markPending(row.id).catch(() => {});
+          log("DL", `Match ${row.id} re-queued (CDN 502).`);
         } else {
-          await markError(currentRow.id);
+          markError(row.id).catch(() => {});
         }
-      } catch (markErrorErr) {
-        console.error("Failed to mark match as error:", markErrorErr);
-      }
-    }
-  } finally {
-    isProcessing = false;
+      })
+      .finally(() => {
+        activeDownloads -= 1;
+      });
+
+    // Small delay between GC requests to avoid rate limits
+    await sleep(1500);
   }
+};
+
+const parseQueue = [];
+let parseRunning = 0;
+
+const drainParseQueue = () => {
+  while (parseRunning < MAX_CONCURRENT_PARSES && parseQueue.length > 0) {
+    const matchId = parseQueue.shift();
+    parseRunning += 1;
+    const pythonCmd =
+      process.platform === "win32"
+        ? ".venv\\Scripts\\python.exe"
+        : "python3";
+    const scriptPath = path.join(__dirname, "parse_match.py");
+    log("Parse", `Parsing match ${matchId} (${parseRunning}/${MAX_CONCURRENT_PARSES} slots)...`);
+    const child = spawn(pythonCmd, [scriptPath, String(matchId)], {
+      cwd: path.resolve(__dirname, ".."),
+      stdio: "pipe",
+      env: { ...process.env },
+    });
+    child.stdout.on("data", (data) => {
+      String(data)
+        .trim()
+        .split("\n")
+        .forEach((line) => log("Parse", line));
+    });
+    child.stderr.on("data", (data) => {
+      String(data)
+        .trim()
+        .split("\n")
+        .forEach((line) => log("Parse", `ERR: ${line}`));
+    });
+    child.on("close", (code) => {
+      parseRunning -= 1;
+      if (code === 0) {
+        log("Parse", `Match ${matchId} parsed successfully.`);
+      } else {
+        log("Parse", `Match ${matchId} parse exited with code ${code}.`);
+      }
+      drainParseQueue();
+    });
+  }
+};
+
+const triggerParse = (matchId) => {
+  parseQueue.push(matchId);
+  drainParseQueue();
 };
 
 const startDownloadPolling = () => {
@@ -493,6 +566,7 @@ const startDownloadPolling = () => {
     return;
   }
   downloadPollerStarted = true;
+  log("DL", `Polling every ${POLL_INTERVAL_MS / 1000}s for pending matches...`);
   setInterval(() => {
     processPending().catch((error) => console.error(error));
   }, POLL_INTERVAL_MS);
@@ -511,8 +585,9 @@ const startMessagePolling = () => {
 };
 
 client.on("loggedOn", () => {
-  console.log("Steam bot logged in.");
+  log("Steam", "Bot logged in successfully.");
   steamReady = true;
+  loginAttempts = 0;
   client.setPersona(SteamUser.EPersonaState.Online);
   client.gamesPlayed(APP_ID_CS2);
 });
@@ -529,20 +604,51 @@ client.on("friendsList", () => {
 });
 
 client.on("error", (error) => {
-  console.error("Steam client error:", error);
+  console.error("[Steam] Client error:", error.message || error);
   steamReady = false;
+  gcReady = false;
+
+  loginAttempts += 1;
+  if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
+    console.error(`[Steam] Max login attempts (${MAX_LOGIN_ATTEMPTS}) reached. Exiting.`);
+    process.exit(1);
+  }
+
+  const delay = GC_RECONNECT_DELAY_MS * loginAttempts;
+  console.log(`[Steam] Reconnecting in ${delay / 1000}s (attempt ${loginAttempts})...`);
+  setTimeout(() => {
+    try {
+      client.logOn({
+        accountName: steamUser,
+        password: steamPass,
+        twoFactorCode: SteamTotp.generateAuthCode(steamSharedSecret),
+      });
+    } catch (reconnectError) {
+      console.error("[Steam] Reconnect failed:", reconnectError);
+    }
+  }, delay);
 });
 
 csgo.on("connectedToGC", () => {
-  console.log("Connected to CS2 Game Coordinator.");
+  log("GC", "Connected to CS2 Game Coordinator.");
   gcReady = true;
   startDownloadPolling();
 });
 
 csgo.on("disconnectedFromGC", () => {
-  console.warn("Disconnected from CS2 Game Coordinator.");
+  log("GC", "Disconnected from CS2 Game Coordinator. Waiting for reconnection...");
   gcReady = false;
 });
+
+// ── Startup banner ──────────────────────────────────────────
+log("Boot", "=".repeat(50));
+log("Boot", "Replay Downloader daemon starting");
+log("Boot", `  Poll interval     : ${POLL_INTERVAL_MS / 1000}s`);
+log("Boot", `  Download timeout  : ${DOWNLOAD_TIMEOUT_MS / 1000}s`);
+log("Boot", `  Max downloads     : ${MAX_CONCURRENT_DOWNLOADS}`);
+log("Boot", `  Max parses        : ${MAX_CONCURRENT_PARSES}`);
+log("Boot", `  Steam user        : ${steamUser}`);
+log("Boot", "=".repeat(50));
 
 client.logOn({
   accountName: steamUser,

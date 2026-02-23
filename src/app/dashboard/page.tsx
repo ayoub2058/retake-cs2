@@ -28,41 +28,112 @@ export default async function DashboardPage() {
   const rows = matches ?? [];
   const matchIds = rows.map((row) => row.id);
   let mapNameByMatchId = new Map<number, string | null>();
+  let scoreByMatchId = new Map<number, { score_ct: number | null; score_t: number | null; winner: string | null }>();
+  let userTeamByMatchId = new Map<number, string | null>();
+
   if (matchIds.length > 0) {
     const { data: mapRows } = await supabase
       .from("matches")
-      .select("match_id, map_name")
+      .select("id, match_id, map_name, score_ct, score_t, winner")
       .in("match_id", matchIds.map((id) => String(id)));
     if (mapRows) {
       mapNameByMatchId = new Map(
         mapRows.map((row) => [Number(row.match_id), row.map_name ?? null])
       );
+      scoreByMatchId = new Map(
+        mapRows.map((row) => [
+          Number(row.match_id),
+          { score_ct: row.score_ct, score_t: row.score_t, winner: row.winner },
+        ])
+      );
+
+      // Fetch the user's team side for each match
+      const matchRowIds = mapRows.map((r) => r.id);
+      if (matchRowIds.length > 0) {
+        const { data: playerRows } = await supabase
+          .from("player_match_stats")
+          .select("match_id, team_side")
+          .in("match_id", matchRowIds)
+          .eq("steam_id", session.steamId);
+        if (playerRows) {
+          // map match_id (internal) back to matches_to_download id
+          const internalToDownloadId = new Map(
+            mapRows.map((r) => [r.id, Number(r.match_id)])
+          );
+          for (const pr of playerRows) {
+            const downloadId = internalToDownloadId.get(pr.match_id);
+            if (downloadId !== undefined) {
+              userTeamByMatchId.set(downloadId, pr.team_side ?? null);
+            }
+          }
+        }
+      }
     }
   }
-  const mappedRows = rows.map((row) => ({
-    ...row,
-    map_name: mapNameByMatchId.get(row.id) ?? null,
-  }));
+
+  const mappedRows = rows.map((row) => {
+    const score = scoreByMatchId.get(row.id);
+    const userTeam = userTeamByMatchId.get(row.id);
+    let result: "win" | "loss" | "tie" | null = null;
+    if (score?.winner && userTeam) {
+      if (score.winner === "Tie") {
+        result = "tie";
+      } else if (score.winner === userTeam) {
+        result = "win";
+      } else {
+        result = "loss";
+      }
+    }
+    let scoreText: string | null = null;
+    if (score?.score_ct != null && score?.score_t != null) {
+      if (userTeam === "CT") {
+        scoreText = `${score.score_ct}-${score.score_t}`;
+      } else if (userTeam === "T") {
+        scoreText = `${score.score_t}-${score.score_ct}`;
+      } else {
+        scoreText = `${score.score_ct}-${score.score_t}`;
+      }
+    }
+    return {
+      ...row,
+      map_name: mapNameByMatchId.get(row.id) ?? null,
+      result,
+      score: scoreText,
+    };
+  });
 
   return (
-    <div className="space-y-10">
+    <div className="space-y-8 animate-fade-in">
       <BotSettings userId={session.steamId} />
 
       <div className="rounded-3xl glass-card p-8">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p className="text-xs uppercase tracking-[0.35em] text-[#d5ff4c]">
+            <p className="text-[10px] uppercase tracking-[0.4em] text-[#d5ff4c]">
               {t("matchIntelligence")}
             </p>
-            <h1 className="mt-3 text-3xl font-semibold text-white">
+            <h1 className="mt-3 text-3xl font-bold text-white">
               {t("yourMatchHistory")}
             </h1>
+            <p className="mt-1 text-sm text-white/40">
+              {rows.length} {rows.length === 1 ? "match" : "matches"} tracked
+            </p>
           </div>
         </div>
 
         {rows.length === 0 ? (
-          <div className="mt-8 rounded-2xl glass-card px-6 py-8 text-zinc-300">
-            {t("noMatchesFound")}
+          <div className="mt-8 flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 px-8 py-16 text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
+              <svg className="h-7 w-7 text-white/30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <p className="text-base font-medium text-white/70">{t("noMatchesFound")}</p>
+            <p className="mt-2 max-w-md text-sm text-white/40">
+              Play a competitive match and the bot will automatically download and analyze it for you.
+            </p>
           </div>
         ) : (
           <MatchTable matches={mappedRows} />

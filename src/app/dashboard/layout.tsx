@@ -13,39 +13,79 @@ export default async function DashboardLayout({
   const t = getTranslations(lang);
   return (
     <div className="flex h-screen w-full overflow-hidden text-white">
-      <aside className="h-full w-64 flex-shrink-0 border-r border-white/10 bg-black/60 backdrop-blur-md">
-        <div className="flex h-full flex-col px-6 py-10">
-          <img
-            src="/images/Sans%20titre-1.png?v=2"
-            alt="Counter-Strike 2"
-            className="mb-6 mt-0 h-auto w-full max-h-16 rounded-xl border border-lime-300/60 bg-black/20 p-2 opacity-95 drop-shadow-[0_0_22px_rgba(163,230,53,0.45)] brightness-120 saturate-170 hue-rotate-[95deg] transition hover:opacity-100 object-contain"
-          />
-          <p className="text-xs uppercase tracking-[0.35em] text-[#67f5ff]">
+      {/* Sidebar */}
+      <aside className="group/sidebar h-full w-64 flex-shrink-0 border-r border-white/[0.06] bg-gradient-to-b from-black/80 via-black/70 to-black/80 backdrop-blur-xl">
+        <div className="flex h-full flex-col px-5 py-8">
+          {/* Logo */}
+          <div className="mb-8 flex items-center gap-3">
+            <img
+              src="/images/Sans%20titre-1.png?v=2"
+              alt="ClipsToCS"
+              className="h-10 w-10 rounded-xl border border-lime-400/40 bg-black/30 p-1.5 object-contain drop-shadow-[0_0_16px_rgba(163,230,53,0.35)] transition hover:drop-shadow-[0_0_24px_rgba(163,230,53,0.55)]"
+            />
+            <div>
+              <h2 className="text-sm font-bold tracking-wide text-white">ClipsToCS</h2>
+              <p className="text-[10px] uppercase tracking-[0.25em] text-white/40">CS2 Intelligence</p>
+            </div>
+          </div>
+
+          {/* Section label */}
+          <p className="mb-4 text-[10px] uppercase tracking-[0.35em] text-[#67f5ff]/70">
             {t("controlRoom")}
           </p>
-          <nav className="mt-8 flex flex-col gap-3 text-sm">
+
+          {/* Navigation */}
+          <nav className="flex flex-col gap-1.5 text-sm">
             <Link
               href="/dashboard"
-              className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3 transition hover:border-white/40 hover:bg-white/15"
+              className="group flex items-center gap-3 rounded-xl border border-transparent px-4 py-3 text-white/80 transition-all hover:border-white/10 hover:bg-white/[0.06] hover:text-white"
             >
+              <svg className="h-4 w-4 text-white/40 transition group-hover:text-[#d5ff4c]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7" rx="1" />
+                <rect x="14" y="3" width="7" height="7" rx="1" />
+                <rect x="3" y="14" width="7" height="7" rx="1" />
+                <rect x="14" y="14" width="7" height="7" rx="1" />
+              </svg>
               {t("matchHistory")}
             </Link>
             <Link
               href="/dashboard/stats"
-              className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3 transition hover:border-white/40 hover:bg-white/15"
+              className="group flex items-center gap-3 rounded-xl border border-transparent px-4 py-3 text-white/80 transition-all hover:border-white/10 hover:bg-white/[0.06] hover:text-white"
             >
+              <svg className="h-4 w-4 text-white/40 transition group-hover:text-[#67f5ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 20V10" />
+                <path d="M12 20V4" />
+                <path d="M6 20v-6" />
+              </svg>
               {t("playerStats")}
             </Link>
           </nav>
-          <div className="mt-auto pt-6">
+
+          {/* Divider */}
+          <div className="my-6 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+
+          {/* Language selector at bottom */}
+          <div className="mt-auto pt-4">
             <LanguageSelector />
           </div>
+
+          {/* Version */}
+          <p className="mt-4 text-center text-[9px] uppercase tracking-[0.3em] text-white/20">
+            v1.0
+          </p>
         </div>
       </aside>
+
+      {/* Main content */}
       <main className="relative h-full flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[1920px] p-6">
-          <div className="mb-8">
+        <div className="mx-auto w-full max-w-[1920px] p-6 lg:p-8">
+          {/* Top bar with search */}
+          <div className="mb-8 flex items-center justify-between gap-4">
             <GlobalSearch />
+            <div className="hidden items-center gap-2 md:flex">
+              <span className="status-dot online" />
+              <span className="text-xs text-white/50">Connected</span>
+            </div>
           </div>
           {children}
         </div>

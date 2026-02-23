@@ -1,14 +1,16 @@
 import type { NextConfig } from "next";
 
-const allowBuildErrors = process.env.ALLOW_BUILD_ERRORS === "true";
-
 const nextConfig: NextConfig = {
-  typescript: {
-    // !! WARN !!
-    // Dangerously allow production builds to successfully complete even if
-    // your project has type errors.
-    ignoreBuildErrors: allowBuildErrors,
+  reactCompiler: true,
+  images: {
+    remotePatterns: [
+      { protocol: "https", hostname: "avatars.steamstatic.com" },
+      { protocol: "https", hostname: "steamcdn-a.akamaihd.net" },
+      { protocol: "https", hostname: "cdn.cloudflare.steamstatic.com" },
+    ],
   },
+  // On Vercel the downloads/ folder doesn't exist – disable the download route
+  serverExternalPackages: ["pg"],
 };
 
 export default nextConfig;

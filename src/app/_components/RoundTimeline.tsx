@@ -63,7 +63,7 @@ export function RoundTimeline({ rounds }: RoundTimelineProps) {
   }
 
   return (
-    <div className="flex h-12 w-full items-stretch overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+    <div className="flex h-14 w-full items-stretch overflow-hidden rounded-xl border border-white/[0.06] bg-black/50">
       {rounds.map((round, index) => {
         const isHalftimeGap = round.round_number === 12;
         const winnerLabel = getWinnerLabel(round.winner_side, {
@@ -85,25 +85,25 @@ export function RoundTimeline({ rounds }: RoundTimelineProps) {
           <div
             key={`${round.round_number}-${index}`}
             className={
-              "group relative flex flex-1 items-center justify-center transition-[flex,transform] duration-150 hover:flex-[1.2] hover:scale-y-110" +
-              (isHalftimeGap ? " mr-1" : "")
+              "group relative flex flex-1 items-center justify-center transition-all duration-200 hover:flex-[1.3] hover:scale-y-105" +
+              (isHalftimeGap ? " ml-0.5 mr-0.5 border-l border-white/10" : "")
             }
           >
-            <div className={`flex h-full w-full items-center justify-center ${colorClass}`}>
-              <Icon className="h-4 w-4 text-black/80" />
+            <div className={`flex h-full w-full items-center justify-center ${colorClass} transition-all duration-200 group-hover:brightness-110`}>
+              <Icon className="h-4 w-4 text-black/70" />
             </div>
-            <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 w-40 -translate-x-1/2 rounded-lg border border-white/10 bg-black/90 px-3 py-2 text-xs text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-              <div className="font-semibold">
+            <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-3 w-44 -translate-x-1/2 rounded-xl border border-white/10 bg-black/95 px-4 py-3 text-xs text-white opacity-0 shadow-2xl transition-opacity group-hover:opacity-100">
+              <div className="mb-1 font-bold text-white">
                 {t("round")} {round.round_number}
               </div>
-              <div>
-                {t("winner")}: {winnerLabel}
+              <div className="text-white/60">
+                {t("winner")}: <span className="text-white/90">{winnerLabel}</span>
               </div>
-              <div>
-                {t("reason")}: {reasonLabel}
+              <div className="text-white/60">
+                {t("reason")}: <span className="text-white/90">{reasonLabel}</span>
               </div>
-              <div>
-                {t("score")}: {scoreLabel}
+              <div className="mt-1 font-mono text-sm font-semibold text-[#d5ff4c]">
+                {scoreLabel}
               </div>
             </div>
           </div>
