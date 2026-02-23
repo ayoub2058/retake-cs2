@@ -26,11 +26,14 @@ const log = (prefix, msg) => {
   console.log(`[${ts()}] [${prefix}] ${msg}`);
 };
 
-// Detect Python executable
-const pythonCmd =
+// Detect Python executable (prefer venv on all platforms)
+const venvPython =
   process.platform === "win32"
     ? path.join(ROOT, ".venv", "Scripts", "python.exe")
-    : "python3";
+    : path.join(ROOT, ".venv", "bin", "python3");
+
+const fs = require("fs");
+const pythonCmd = fs.existsSync(venvPython) ? venvPython : "python3";
 
 const services = [
   {
