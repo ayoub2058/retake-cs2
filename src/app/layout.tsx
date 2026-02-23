@@ -16,19 +16,19 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ClipsToCS - CS2 Match Intelligence",
+  title: "RetakeAI - CS2 Match Intelligence",
   description:
     "Analyze your CS2 matches automatically. Download replays, track stats, and get AI coaching tips.",
-  icons: { icon: "/images/Sans%20titre-1.png" },
+  icons: { icon: "/images/retakeai-icon.png" },
   openGraph: {
-    title: "ClipsToCS - CS2 Match Intelligence",
+    title: "RetakeAI - CS2 Match Intelligence",
     description:
       "Analyze your CS2 matches automatically. Download replays, track stats, and get AI coaching tips.",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "ClipsToCS - CS2 Match Intelligence",
+    title: "RetakeAI - CS2 Match Intelligence",
     description:
       "Analyze your CS2 matches automatically. Download replays, track stats, and get AI coaching tips.",
   },

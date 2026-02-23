@@ -19,12 +19,12 @@ export default async function DashboardLayout({
           {/* Logo */}
           <div className="mb-8 flex items-center gap-3">
             <img
-              src="/images/Sans%20titre-1.png?v=2"
-              alt="ClipsToCS"
+              src="/images/retakeai-icon.png"
+              alt="RetakeAI"
               className="h-10 w-10 rounded-xl border border-lime-400/40 bg-black/30 p-1.5 object-contain drop-shadow-[0_0_16px_rgba(163,230,53,0.35)] transition hover:drop-shadow-[0_0_24px_rgba(163,230,53,0.55)]"
             />
             <div>
-              <h2 className="text-sm font-bold tracking-wide text-white">ClipsToCS</h2>
+              <h2 className="text-sm font-bold tracking-wide text-white">RetakeAI</h2>
               <p className="text-[10px] uppercase tracking-[0.25em] text-white/40">CS2 Intelligence</p>
             </div>
           </div>

@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * ClipsToCS – Unified Background Pipeline Launcher
+ * RetakeAI – Unified Background Pipeline Launcher
  *
  * Starts all three daemon services in parallel:
  *   1. poll_matches.py   – polls Steam API for new match codes
@@ -135,7 +135,7 @@ process.on("SIGTERM", shutdown);
 // ── Banner ──────────────────────────────────────────
 console.log("");
 console.log("  ╔══════════════════════════════════════════╗");
-console.log("  ║     ClipsToCS  Background Pipeline       ║");
+console.log("  ║     RetakeAI   Background Pipeline       ║");
 console.log("  ║                                          ║");
 console.log("  ║  [1] Match Poller     (poll_matches.py)  ║");
 console.log("  ║  [2] Replay Downloader (replay_downloader)║");
