@@ -21,7 +21,7 @@ export default async function DashboardLayout({
             <img
               src="/images/retakeai-icon.png"
               alt="RetakeAI"
-              className="h-10 w-10 rounded-xl border border-lime-400/40 bg-black/30 p-1.5 object-contain drop-shadow-[0_0_16px_rgba(163,230,53,0.35)] transition hover:drop-shadow-[0_0_24px_rgba(163,230,53,0.55)]"
+              className="h-11 w-11 rounded-xl object-cover ring-1 ring-lime-400/30 drop-shadow-[0_0_14px_rgba(163,230,53,0.3)] transition hover:ring-lime-400/50 hover:drop-shadow-[0_0_22px_rgba(163,230,53,0.5)]"
             />
             <div>
               <h2 className="text-sm font-bold tracking-wide text-white">RetakeAI</h2>
