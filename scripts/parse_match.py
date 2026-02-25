@@ -1043,7 +1043,14 @@ def parse_stats(
             if not distances.empty:
                 avg_death_distance = round(float(distances.mean()), 1)
 
-    for round_data in rounds:
+    # ── Per-round analysis: kills, multi-kills, clutches ──
+    multi_kill_rounds: List[Dict[str, Any]] = []
+    clutch_rounds: List[Dict[str, Any]] = []
+    user_round_kills: Dict[int, int] = {}  # round_num → kills by user
+    user_round_deaths: List[int] = []      # rounds where user died
+
+    for rnd_idx, round_data in enumerate(rounds):
+        round_num = rnd_idx + 1
         kills_list = round_data.get("kills", []) or []
         if kills_list:
             opening_kill = min(kills_list, key=extract_time_value)
@@ -1054,6 +1061,8 @@ def parse_stats(
             if opening_victim and opening_victim == target_steam_id:
                 opening_deaths += 1
 
+        user_kills_this_round = 0
+        user_died_this_round = False
         for kill in kills_list:
             attacker = normalize_id(kill.get("attackerSteamID"))
             victim = normalize_id(kill.get("victimSteamID"))
@@ -1062,17 +1071,82 @@ def parse_stats(
                 weapon_key = str(weapon)
                 weapon_counts[weapon_key] = weapon_counts.get(weapon_key, 0) + 1
             if attacker and attacker == target_steam_id:
+                user_kills_this_round += 1
                 attacker_side = extract_side(kill, "attacker")
                 if attacker_side == "CT":
                     ct_kills += 1
                 elif attacker_side == "T":
                     t_kills += 1
             if victim and victim == target_steam_id:
+                user_died_this_round = True
                 victim_side = extract_side(kill, "victim")
                 if victim_side == "CT":
                     ct_deaths += 1
                 elif victim_side == "T":
                     t_deaths += 1
+
+        if user_kills_this_round > 0:
+            user_round_kills[round_num] = user_kills_this_round
+        if user_kills_this_round >= 3:
+            multi_kill_label = {3: "3K", 4: "4K", 5: "ACE"}.get(
+                user_kills_this_round, f"{user_kills_this_round}K"
+            )
+            multi_kill_rounds.append({
+                "round": round_num,
+                "kills": user_kills_this_round,
+                "label": multi_kill_label,
+            })
+        if user_died_this_round:
+            user_round_deaths.append(round_num)
+
+        # ── Clutch detection ──
+        # A clutch = user is last alive on their team facing 2+ enemies, then gets kills
+        if kills_list and len(kills_list) >= 2:
+            sorted_kills = sorted(kills_list, key=extract_time_value)
+            # Determine user's CURRENT side this round
+            user_current_side = None
+            for k in sorted_kills:
+                kid = normalize_id(k.get("attackerSteamID"))
+                vid = normalize_id(k.get("victimSteamID"))
+                if kid == target_steam_id:
+                    user_current_side = extract_side(k, "attacker")
+                    break
+                if vid == target_steam_id:
+                    user_current_side = extract_side(k, "victim")
+                    break
+            if user_current_side:
+                t_size = team_size if team_size else 5
+                teammates_alive = t_size  # including user
+                enemies_alive = t_size
+                user_still_alive = True
+                clutch_triggered = False
+                clutch_enemies = 0
+                clutch_kills = 0
+                for k in sorted_kills:
+                    v_side = extract_side(k, "victim")
+                    v_id = normalize_id(k.get("victimSteamID"))
+                    a_id = normalize_id(k.get("attackerSteamID"))
+                    if v_side == user_current_side:
+                        if v_id == target_steam_id:
+                            user_still_alive = False
+                        else:
+                            teammates_alive -= 1
+                    elif v_side:
+                        enemies_alive -= 1
+                    # Check if user is now alone vs 2+ enemies
+                    if (teammates_alive == 1 and user_still_alive
+                            and enemies_alive >= 2 and not clutch_triggered):
+                        clutch_triggered = True
+                        clutch_enemies = enemies_alive
+                    if clutch_triggered and a_id == target_steam_id:
+                        clutch_kills += 1
+                if clutch_triggered and user_still_alive and clutch_kills > 0:
+                    clutch_rounds.append({
+                        "round": round_num,
+                        "situation": f"1v{clutch_enemies}",
+                        "kills": clutch_kills,
+                        "survived": True,
+                    })
 
     if not rounds and time_col and attacker_col and victim_col and not deaths_with_round.empty and round_key:
         deaths_df_local = deaths_with_round.copy()
@@ -1267,7 +1341,9 @@ def parse_stats(
             if victim_id:
                 opening_deaths_by_id[victim_id] = opening_deaths_by_id.get(victim_id, 0) + 1
 
-    for round_data in rounds:
+    first_half_side_by_id: Dict[str, str] = {}  # player_id → starting side (from first-half kills)
+    for rnd_idx, round_data in enumerate(rounds):
+        is_first_half = rnd_idx < mr
         kills_list = round_data.get("kills", []) if isinstance(round_data, dict) else []
         for kill in kills_list or []:
             if not isinstance(kill, dict):
@@ -1279,9 +1355,13 @@ def parse_stats(
             if attacker_id and attacker_side:
                 side_by_id.setdefault(attacker_id, {"CT": 0, "T": 0})
                 side_by_id[attacker_id][attacker_side] += 1
+                if is_first_half and attacker_id not in first_half_side_by_id:
+                    first_half_side_by_id[attacker_id] = attacker_side
             if victim_id and victim_side:
                 side_by_id.setdefault(victim_id, {"CT": 0, "T": 0})
                 side_by_id[victim_id][victim_side] += 1
+                if is_first_half and victim_id not in first_half_side_by_id:
+                    first_half_side_by_id[victim_id] = victim_side
 
     team_graph: Dict[str, List[str]] = {}
     if attacker_col and victim_col and not deaths_df.empty:
@@ -1332,15 +1412,18 @@ def parse_stats(
     def resolve_starting_side(player_id: str) -> Optional[str]:
         """Return the side the player STARTED the match on.
 
-        resolve_team_side() returns the last-recorded side, which is the
-        second-half side when match went past halftime.  We invert it to
-        get the starting side so it aligns with score_ct / score_t
-        (which represent *team* scores, not side scores).
+        Primary: use first-half kill events — in the first half the side
+        a player plays on IS their starting side (reliable).
+        Fallback: invert the last-recorded side when the match went
+        past halftime.
         """
+        # Best source: first-half kill events (always correct)
+        if player_id in first_half_side_by_id:
+            return first_half_side_by_id[player_id]
+        # Fallback: invert last-recorded side if past halftime
         current = resolve_team_side(player_id)
         if not current:
             return None
-        # If the match went past halftime the recorded side is second-half
         if round_count > mr:
             return "T" if current == "CT" else "CT"
         return current
@@ -1561,11 +1644,18 @@ def parse_stats(
         "score_t": score_t,
         "winner": winner,
         "map_name": match_meta.get("map_name"),
+        "multi_kill_rounds": multi_kill_rounds,
+        "clutch_rounds": clutch_rounds,
+        "user_round_kills": user_round_kills,
+        "user_round_deaths": user_round_deaths,
     }
 
 
 def get_ai_coaching_tip(
-    stats: Dict[str, Any], language: Optional[str], style: Optional[str]
+    stats: Dict[str, Any],
+    language: Optional[str],
+    style: Optional[str],
+    match_id: Optional[int] = None,
 ) -> str:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -1600,6 +1690,10 @@ def get_ai_coaching_tip(
     winner = stats.get("winner")
     map_name = stats.get("map_name")
     players_stats = stats.get("players_stats") or []
+    multi_kill_rounds = stats.get("multi_kill_rounds") or []
+    clutch_rounds = stats.get("clutch_rounds") or []
+    user_round_kills = stats.get("user_round_kills") or {}
+    user_round_deaths = stats.get("user_round_deaths") or []
 
     if team_size:
         opening_advantage = f"{team_size}v{team_size - 1}"
@@ -1626,14 +1720,22 @@ def get_ai_coaching_tip(
             user_score = score_t
             enemy_score = score_ct
 
+    # ── Format map name for display ──
+    display_map = map_name or "Unknown Map"
+    if display_map.startswith("de_"):
+        display_map = display_map[3:].capitalize()
+
     # ── Build comprehensive stats block ──
-    stats_lines = [
-        f"Match Result: {match_result}",
-    ]
+    stats_lines: List[str] = []
+
+    # Header line with map + result + score
+    header_parts = [f"Map: {display_map}"]
+    if match_result != "Unknown":
+        header_parts.append(f"Result: {match_result}")
     if user_score is not None and enemy_score is not None:
-        stats_lines.append(f"Final Score: {user_score}-{enemy_score} (player's perspective)")
-    if map_name:
-        stats_lines.append(f"Map: {map_name}")
+        header_parts.append(f"Score: {user_score}-{enemy_score}")
+    stats_lines.append(" | ".join(header_parts))
+
     if game_mode:
         mode_line = f"Game mode: {game_mode}"
         if team_size:
@@ -1641,50 +1743,83 @@ def get_ai_coaching_tip(
         stats_lines.append(mode_line)
     if user_team_side:
         stats_lines.append(f"Player's starting side: {user_team_side}")
+
+    stats_lines.append("")
+    stats_lines.append("-- Core Stats --")
     stats_lines.extend([
-        f"Overall K/D: {stats['kd_ratio']}",
+        f"K/D: {stats['kills']}/{stats['deaths']} (ratio: {stats['kd_ratio']})",
         f"ADR: {stats['adr']}",
         f"HS%: {stats['hs_percent']}%",
-        f"Opening Duel Win Rate: {opening_win_rate}% (opening kill creates a {opening_advantage})",
+        f"Most used weapon: {fav_weapon if fav_weapon else 'unknown'}",
+    ])
+
+    stats_lines.append("")
+    stats_lines.append("-- Opening Duels --")
+    stats_lines.extend([
         f"Opening Kills: {stats.get('opening_kills', 0)}",
         f"Opening Deaths: {stats.get('opening_deaths', 0)}",
-        f"Kills: {stats['kills']}",
-        f"Deaths: {stats['deaths']}",
-        f"CT K/D: {ct_kd if ct_kd is not None else 'N/A'}",
-        f"T K/D: {t_kd if t_kd is not None else 'N/A'}",
+        f"Opening Duel Win Rate: {opening_win_rate}% (creates a {opening_advantage})",
     ])
-    if ct_kills is not None and t_kills is not None:
-        stats_lines.extend([f"CT Kills: {ct_kills}", f"T Kills: {t_kills}"])
-    if ct_deaths is not None and t_deaths is not None:
-        stats_lines.extend([f"CT Deaths: {ct_deaths}", f"T Deaths: {t_deaths}"])
-    if top_death_rounds:
-        rounds_list = ", ".join(str(value) for value in top_death_rounds)
-        stats_lines.append(f"Rounds with most deaths: {rounds_list}")
+
+    if ct_kd is not None or t_kd is not None:
+        stats_lines.append("")
+        stats_lines.append("-- Side Performance --")
+        if ct_kills is not None and ct_deaths is not None:
+            stats_lines.append(f"CT side: {ct_kills}K/{ct_deaths}D (K/D: {ct_kd})")
+        if t_kills is not None and t_deaths is not None:
+            stats_lines.append(f"T side: {t_kills}K/{t_deaths}D (K/D: {t_kd})")
+
+    # ── Round highlights (multi-kills, clutches, deaths) ──
+    if multi_kill_rounds or clutch_rounds or user_round_deaths:
+        stats_lines.append("")
+        stats_lines.append("-- Round Highlights --")
+        for mk in multi_kill_rounds:
+            stats_lines.append(
+                f"Round {mk['round']}: {mk['label']} ({mk['kills']} kills)"
+            )
+        for cl in clutch_rounds:
+            stats_lines.append(
+                f"Round {cl['round']}: Clutch {cl['situation']} "
+                f"({cl['kills']} kill{'s' if cl['kills'] > 1 else ''}, "
+                f"{'survived' if cl.get('survived') else 'died'})"
+            )
+        if user_round_deaths:
+            death_rounds_str = ", ".join(str(r) for r in sorted(user_round_deaths))
+            stats_lines.append(f"Died in rounds: {death_rounds_str}")
+        if top_death_rounds:
+            rounds_list = ", ".join(str(v) for v in top_death_rounds)
+            stats_lines.append(f"Rounds with most deaths: {rounds_list}")
+
     if common_death_weapon:
-        stats_lines.append(f"Most killed by weapon: {common_death_weapon}")
+        stats_lines.append(f"Most killed by: {common_death_weapon}")
     if death_headshot_rate is not None:
-        stats_lines.append(f"Death headshot rate (killed by HS): {death_headshot_rate}%")
-    stats_lines.append(f"Most used weapon: {fav_weapon if fav_weapon else 'unknown'}")
+        stats_lines.append(f"Death HS rate (killed by HS): {death_headshot_rate}%")
 
     # ── Teammate/enemy scoreboard context ──
     teammates = []
     enemies = []
     for p in players_stats:
-        line = f"{p.get('player_name') or p.get('steam_id')}: K{p.get('kills',0)}/D{p.get('deaths',0)}/A{p.get('assists',0)} ADR:{p.get('adr',0)} HS:{p.get('hs_percent',0)}%"
+        line = (
+            f"{p.get('player_name') or p.get('steam_id')}: "
+            f"{p.get('kills',0)}K/{p.get('deaths',0)}D/{p.get('assists',0)}A "
+            f"ADR:{p.get('adr',0)} HS:{p.get('hs_percent',0)}%"
+        )
         if user_team_side and p.get("team_side") == user_team_side:
             teammates.append(line)
         else:
             enemies.append(line)
 
     if teammates:
-        stats_lines.append("\nTeammates:")
-        stats_lines.extend(f"  - {t}" for t in teammates)
+        stats_lines.append("")
+        stats_lines.append("-- Teammates --")
+        stats_lines.extend(f"  {t}" for t in teammates)
     if enemies:
-        stats_lines.append("Opponents:")
-        stats_lines.extend(f"  - {e}" for e in enemies)
+        stats_lines.append("")
+        stats_lines.append("-- Opponents --")
+        stats_lines.extend(f"  {e}" for e in enemies)
 
     # ── Extra contextual facts ──
-    facts_lines = []
+    facts_lines: List[str] = []
     if avg_death_time_sec is not None:
         facts_lines.append(f"Avg death time into round: {avg_death_time_sec}s")
     if median_death_time_sec is not None:
@@ -1696,11 +1831,11 @@ def get_ai_coaching_tip(
         t_buy = buy_summary.get("T", {})
         if ct_buy:
             facts_lines.append(
-                "CT economy rounds: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
+                "CT economy: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
             )
         if t_buy:
             facts_lines.append(
-                "T economy rounds: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
+                "T economy: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
             )
 
     style_value = (style or "narrative").strip().lower()
@@ -1719,35 +1854,50 @@ def get_ai_coaching_tip(
         style_prompt = "Give advice in 1-2 sentences maximum. Be direct."
     else:
         style_prompt = (
-            "Use a detailed Match Report format with three sections in this exact order: "
-            "THE GOOD, THE BAD, THE FIX. "
-            "Each section must include a clear coaching takeaway and a concrete action. "
-            "Add a few tasteful emojis to emphasize key points. "
-            "Include 2-4 short factual bullets before the narrative."
+            "Structure the report as follows:\n"
+            "1. A one-line match summary header with the map, result and score.\n"
+            "2. Section: THE GOOD - what the player did well (reference specific rounds, multi-kills, clutches).\n"
+            "3. Section: THE BAD - what went wrong (reference specific death rounds, weak stats).\n"
+            "4. Section: THE FIX - 2-3 actionable tips with concrete advice.\n"
+            "Use emojis to mark each section. "
+            "Reference specific round numbers when discussing multi-kills, clutches, or deaths. "
+            "Keep it concise but impactful."
         )
 
     language_prompt = ""
     if language_value == "arabic":
         language_prompt = (
-            "Output the entire response in Arabic (Modern Standard or generic dialect). "
-            "Do not include any English words or Latin letters. "
-            "Use western digits (0-9) for all numbers. "
-            "Place numbers after the Arabic words (e.g., 'نسبة الفوز 71.4%'). "
-            "Avoid parentheses and slashes to reduce RTL alignment issues."
+            "Output the ENTIRE response in Arabic. Very important rules for Arabic output:\n"
+            "- Use Modern Standard Arabic or generic dialect.\n"
+            "- Do NOT include any English words or Latin letters.\n"
+            "- Use western digits 0-9 for all numbers.\n"
+            "- Do NOT use parentheses ( ), slashes / \\ , or colons : inside sentences.\n"
+            "- Instead of parentheses, use dashes - or commas , to separate info.\n"
+            "- Use line breaks between sections for readability.\n"
+            "- Use simple bullet points with - instead of * or other markers.\n"
+            "- Place numbers after Arabic words: 'نسبة الفوز 71.4%'.\n"
+            "- Start the message with a right-to-left mark.\n"
+            "- Translate map names: de_dust2 = دست 2, de_nuke = نوك, de_ancient = انشنت, "
+            "de_mirage = ميراج, de_inferno = انفيرنو, de_anubis = انوبيس, de_vertigo = فيرتيجو.\n"
+            "- Keep section headers short and clear."
         )
     else:
         language_prompt = "Output the entire response in English."
 
     prompt = (
-        "You are a CS2 coach analyzing a real match demo. "
-        "All the stats below are extracted directly from the demo file — they are accurate. "
-        "Reference specific numbers from the data (K/D, ADR, HS%, opening duels, scores). "
-        "Compare the player's performance to their teammates and opponents when relevant. "
-        "If the player lost, focus on what they can improve. If they won, highlight what worked and what could be even better. "
-        "Do not guess about economy or round type; only reference data that is provided. "
-        "No markdown headers like ###. Use bold sparingly for key numbers/phrases. "
+        "You are a CS2 coach sending a match analysis via Steam chat message. "
+        "All the stats below are extracted directly from the demo file and are accurate. "
+        "Reference specific numbers from the data: K/D, ADR, HS%, opening duels, scores. "
+        "Reference SPECIFIC ROUND NUMBERS when discussing multi-kills, clutches, or deaths. "
+        "Compare the player to their teammates and opponents when relevant. "
+        "If the player lost, focus on what they can improve. If they won, highlight what worked and what could be better. "
+        "Do not guess about economy or round type; only reference provided data. "
+        "IMPORTANT: This is a Steam chat message, NOT a web page. "
+        "Do NOT use markdown headers ### or **bold**. "
+        "Use simple text formatting only: dashes for bullets, line breaks for sections. "
+        "Keep the total message under 1500 characters so it reads well in Steam chat.\n\n"
         + style_prompt
-        + " "
+        + "\n\n"
         + language_prompt
         + "\n\nMatch Stats (from demo):\n"
         + "\n".join(stats_lines)
@@ -1766,9 +1916,31 @@ def get_ai_coaching_tip(
         raise RuntimeError(f"Groq request failed: {exc}") from exc
 
     response_text = completion.choices[0].message.content.strip()
+
+    # Remove any markdown formatting the model might have included
+    response_text = response_text.replace("**", "").replace("###", "").replace("##", "").replace("# ", "")
+
+    # ── Append match detail link ──
+    match_link = ""
+    if match_id is not None:
+        base_url = os.getenv("NEXT_PUBLIC_BASE_URL", "https://retake-cs2.vercel.app")
+        match_url = f"{base_url}/dashboard/matches/{match_id}"
+        if language_value == "arabic":
+            match_link = (
+                f"\n\n\u200F\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f4ca \u0634\u0648\u0641 \u0625\u062d\u0635\u0627\u0626\u064a\u0627\u062a\u0643 \u0627\u0644\u0643\u0627\u0645\u0644\u0629 \u0647\u0646\u0627\n"
+                f"{match_url}"
+            )
+        else:
+            match_link = (
+                f"\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f4ca View your full match stats here\n"
+                f"{match_url}"
+            )
+
     if language_value == "arabic":
-        return f"\u200F{response_text}\u200F"
-    return response_text
+        return f"\u200F{response_text}{match_link}\u200F"
+    return f"{response_text}{match_link}"
 
 
 def parse_match_logic(
@@ -1803,7 +1975,7 @@ def parse_match_logic(
                 insert_player_stats(cursor, match_row_id, players_stats)
                 insert_rounds(cursor, match_row_id, rounds_history)
 
-                tip = get_ai_coaching_tip(stats, language, coach_style)
+                tip = get_ai_coaching_tip(stats, language, coach_style, match_id=match_id_value)
                 if not tip:
                     raise RuntimeError("Coach tip was empty")
                 mark_parsed(cursor, match_id_value, tip)

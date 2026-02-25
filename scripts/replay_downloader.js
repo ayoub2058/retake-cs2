@@ -75,7 +75,11 @@ let downloadPollerStarted = false;
 let messagePollerStarted = false;
 let loginAttempts = 0;
 let activeParses = 0;
-const MAX_LOGIN_ATTEMPTS = 5;
+const MAX_LOGIN_ATTEMPTS = 10;
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_DISCONNECTED_MS = 15 * 60 * 1000;  // 15 min offline → exit for pm2 restart
+let lastConnectedAt = Date.now();
+let disconnectedSince = null;
 const retryAfterByMatchId = new Map();
 
 const ensureDownloadsDir = async () => {
@@ -588,6 +592,8 @@ client.on("loggedOn", () => {
   log("Steam", "Bot logged in successfully.");
   steamReady = true;
   loginAttempts = 0;
+  disconnectedSince = null;
+  lastConnectedAt = Date.now();
   client.setPersona(SteamUser.EPersonaState.Online);
   client.gamesPlayed(APP_ID_CS2);
 });
@@ -607,14 +613,17 @@ client.on("error", (error) => {
   console.error("[Steam] Client error:", error.message || error);
   steamReady = false;
   gcReady = false;
+  if (!disconnectedSince) {
+    disconnectedSince = Date.now();
+  }
 
   loginAttempts += 1;
   if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
-    console.error(`[Steam] Max login attempts (${MAX_LOGIN_ATTEMPTS}) reached. Exiting.`);
+    console.error(`[Steam] Max login attempts (${MAX_LOGIN_ATTEMPTS}) reached. Exiting for pm2 restart.`);
     process.exit(1);
   }
 
-  const delay = GC_RECONNECT_DELAY_MS * loginAttempts;
+  const delay = Math.min(GC_RECONNECT_DELAY_MS * loginAttempts, 120_000);
   console.log(`[Steam] Reconnecting in ${delay / 1000}s (attempt ${loginAttempts})...`);
   setTimeout(() => {
     try {
@@ -632,13 +641,36 @@ client.on("error", (error) => {
 csgo.on("connectedToGC", () => {
   log("GC", "Connected to CS2 Game Coordinator.");
   gcReady = true;
+  disconnectedSince = null;
   startDownloadPolling();
 });
 
 csgo.on("disconnectedFromGC", () => {
   log("GC", "Disconnected from CS2 Game Coordinator. Waiting for reconnection...");
   gcReady = false;
+  if (!disconnectedSince) {
+    disconnectedSince = Date.now();
+  }
 });
+
+// ── Heartbeat: detect silently dead connections ──
+setInterval(() => {
+  if (!steamReady || !gcReady) {
+    const downFor = disconnectedSince
+      ? Math.round((Date.now() - disconnectedSince) / 1000)
+      : 0;
+    log("Heartbeat", `Steam=${steamReady ? "OK" : "DOWN"} GC=${gcReady ? "OK" : "DOWN"} (down ${downFor}s)`);
+
+    // If disconnected too long, exit so pm2 does a clean restart
+    if (disconnectedSince && Date.now() - disconnectedSince > MAX_DISCONNECTED_MS) {
+      log("Heartbeat", `Disconnected for >${MAX_DISCONNECTED_MS / 60000}min. Exiting for pm2 restart.`);
+      process.exit(1);
+    }
+  } else {
+    const uptime = Math.round((Date.now() - lastConnectedAt) / 1000);
+    log("Heartbeat", `Steam=OK GC=OK (uptime ${uptime}s, downloads=${activeDownloads})`);
+  }
+}, HEARTBEAT_INTERVAL_MS);
 
 // ── Startup banner ──────────────────────────────────────────
 log("Boot", "=".repeat(50));
