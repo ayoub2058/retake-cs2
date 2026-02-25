@@ -383,21 +383,28 @@ const claimNextTip = async () => {
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
+    // CTE locks ONLY the matches_to_download row (no JOIN inside the lock)
+    // then we join users OUTSIDE the CTE — avoids the PostgreSQL
+    // "FOR UPDATE cannot be applied to the nullable side of an outer join" error.
     const result = await db.query(
       `
+      with tip as (
+        select id, user_id, coach_tip
+        from public.matches_to_download
+        where status in ('processed', 'parsed')
+          and coach_tip is not null
+          and (tip_sent is null or tip_sent = false)
+        order by id asc
+        limit 1
+        for update skip locked
+      )
       select
-        m.id,
-        m.user_id,
-        m.coach_tip,
-        coalesce(u.steam_id::text, m.user_id::text) as user_steam_id
-      from public.matches_to_download m
-      left join public.users u on u.steam_id::text = m.user_id::text
-      where m.status in ('processed', 'parsed')
-        and m.coach_tip is not null
-        and (m.tip_sent is null or m.tip_sent = false)
-      order by m.id asc
-      limit 1
-      for update skip locked
+        tip.id,
+        tip.user_id,
+        tip.coach_tip,
+        coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id
+      from tip
+      left join public.users u on u.steam_id::text = tip.user_id::text
       `
     );
     if (!result.rows.length) {
