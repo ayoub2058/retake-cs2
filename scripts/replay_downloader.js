@@ -374,23 +374,52 @@ const sendDownloadMessage = async (steamId, matchId) => {
   }
 };
 
-const fetchPendingTips = async () => {
-  const result = await pool.query(
-    `
-    select
-      m.id,
-      m.user_id,
-      m.coach_tip,
-      coalesce(u.steam_id::text, m.user_id::text) as user_steam_id
-    from public.matches_to_download m
-    left join public.users u on u.steam_id::text = m.user_id::text
-    where m.status in ('processed', 'parsed')
-      and m.coach_tip is not null
-      and (m.tip_sent is null or m.tip_sent = false)
-    order by m.id asc
-    `
-  );
-  return result.rows;
+/**
+ * Atomically claim ONE pending tip using SELECT ... FOR UPDATE SKIP LOCKED
+ * so that concurrent instances / restarts never send the same tip twice.
+ * Returns null when there is nothing to send.
+ */
+const claimNextTip = async () => {
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+    const result = await db.query(
+      `
+      select
+        m.id,
+        m.user_id,
+        m.coach_tip,
+        coalesce(u.steam_id::text, m.user_id::text) as user_steam_id
+      from public.matches_to_download m
+      left join public.users u on u.steam_id::text = m.user_id::text
+      where m.status in ('processed', 'parsed')
+        and m.coach_tip is not null
+        and (m.tip_sent is null or m.tip_sent = false)
+      order by m.id asc
+      limit 1
+      for update skip locked
+      `
+    );
+    if (!result.rows.length) {
+      await db.query("COMMIT");
+      return null;
+    }
+    const row = result.rows[0];
+    // Mark claimed immediately so no other process picks it up
+    await db.query(
+      `update public.matches_to_download
+       set tip_sent = true
+       where id = $1`,
+      [row.id]
+    );
+    await db.query("COMMIT");
+    return row;
+  } catch (err) {
+    await db.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    db.release();
+  }
 };
 
 const markTipSent = async (matchId) => {
@@ -405,6 +434,16 @@ const markTipSent = async (matchId) => {
   );
 };
 
+/** Revert tip_sent so the next cycle retries delivery. */
+const revertTipClaim = async (matchId) => {
+  await pool.query(
+    `update public.matches_to_download
+     set tip_sent = false
+     where id = $1 and status not in ('notified')`,
+    [matchId]
+  );
+};
+
 const sendPendingMessages = async () => {
   if (isSendingTips || !steamReady) {
     return;
@@ -412,28 +451,34 @@ const sendPendingMessages = async () => {
 
   isSendingTips = true;
   try {
-    const rows = await fetchPendingTips();
-    if (!rows.length) {
-      return;
-    }
+    // Process tips one-at-a-time with atomic claim
+    let sent = 0;
+    while (true) {
+      const row = await claimNextTip();
+      if (!row) break;
 
-    for (const row of rows) {
       const steamId = row.user_steam_id;
-      console.log(
-        `Friend Status for ${steamId}: ${client.myFriends?.[steamId]}`
-      );
+      log("Tip", `Claimed match ${row.id} for ${steamId} (friend status: ${client.myFriends?.[steamId]})`);
+
       if (!canMessageUser(steamId)) {
-        console.warn(`Cannot message ${steamId}; not a friend or blocked.`);
+        log("Tip", `Cannot message ${steamId}; not a friend. Will retry later.`);
+        await revertTipClaim(row.id);
         continue;
       }
 
       try {
         client.chat.sendFriendMessage(steamId, row.coach_tip);
         await markTipSent(row.id);
-        console.log(`Sent coach tip for match ${row.id}.`);
+        sent++;
+        log("Tip", `Sent coach tip for match ${row.id} (${sent} this cycle).`);
       } catch (error) {
         console.warn(`Failed to send tip to ${steamId}:`, error);
+        // Revert so we retry next cycle
+        await revertTipClaim(row.id);
       }
+
+      // Small delay between messages to avoid Steam rate-limiting
+      await sleep(1500);
     }
   } finally {
     isSendingTips = false;
