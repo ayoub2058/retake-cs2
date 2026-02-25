@@ -1939,7 +1939,7 @@ def get_ai_coaching_tip(
             )
 
     if language_value == "arabic":
-        return f"\u200F{response_text}{match_link}\u200F"
+        return f"\u200F{response_text}{match_link}"
     return f"{response_text}{match_link}"
 
 
