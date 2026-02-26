@@ -1725,6 +1725,14 @@ def get_ai_coaching_tip(
     if display_map.startswith("de_"):
         display_map = display_map[3:].capitalize()
 
+    # ── Additional data from stats ──
+    rounds_history = stats.get("rounds") or []
+    common_death_round = stats.get("common_death_round")
+    first_death_round = stats.get("first_death_round")
+    total_rounds = len(rounds_history) if rounds_history else (
+        (user_score + enemy_score) if user_score is not None and enemy_score is not None else 0
+    )
+
     # ── Build comprehensive stats block ──
     stats_lines: List[str] = []
 
@@ -1769,10 +1777,22 @@ def get_ai_coaching_tip(
         if t_kills is not None and t_deaths is not None:
             stats_lines.append(f"T side: {t_kills}K/{t_deaths}D (K/D: {t_kd})")
 
-    # ── Round highlights (multi-kills, clutches, deaths) ──
-    if multi_kill_rounds or clutch_rounds or user_round_deaths:
+    # ── Round-by-round breakdown ──
+    if user_round_kills or user_round_deaths:
         stats_lines.append("")
-        stats_lines.append("-- Round Highlights --")
+        stats_lines.append("-- Per-Round Kill/Death Log --")
+        all_round_nums = sorted(
+            set(user_round_kills.keys()) | set(user_round_deaths)
+        )
+        for rn in all_round_nums:
+            k = user_round_kills.get(rn, 0)
+            d = "died" if rn in user_round_deaths else "survived"
+            stats_lines.append(f"Round {rn}: {k} kill{'s' if k != 1 else ''}, {d}")
+
+    # ── Round highlights (multi-kills, clutches) ──
+    if multi_kill_rounds or clutch_rounds:
+        stats_lines.append("")
+        stats_lines.append("-- Notable Rounds --")
         for mk in multi_kill_rounds:
             stats_lines.append(
                 f"Round {mk['round']}: {mk['label']} ({mk['kills']} kills)"
@@ -1783,17 +1803,62 @@ def get_ai_coaching_tip(
                 f"({cl['kills']} kill{'s' if cl['kills'] > 1 else ''}, "
                 f"{'survived' if cl.get('survived') else 'died'})"
             )
-        if user_round_deaths:
-            death_rounds_str = ", ".join(str(r) for r in sorted(user_round_deaths))
-            stats_lines.append(f"Died in rounds: {death_rounds_str}")
-        if top_death_rounds:
-            rounds_list = ", ".join(str(v) for v in top_death_rounds)
-            stats_lines.append(f"Rounds with most deaths: {rounds_list}")
 
+    # ── Death analysis ──
+    stats_lines.append("")
+    stats_lines.append("-- Death Analysis --")
+    if user_round_deaths:
+        death_rounds_str = ", ".join(str(r) for r in sorted(user_round_deaths))
+        stats_lines.append(f"Died in rounds: {death_rounds_str}")
+        rounds_survived = [
+            rn for rn in range(1, (total_rounds or 1) + 1)
+            if rn not in user_round_deaths
+        ]
+        if rounds_survived:
+            stats_lines.append(f"Survived rounds: {', '.join(str(r) for r in rounds_survived)}")
+    if first_death_round is not None:
+        stats_lines.append(f"First death occurred in round: {first_death_round}")
+    if common_death_round is not None:
+        stats_lines.append(f"Most common death round: {common_death_round}")
+    if top_death_rounds:
+        rounds_list = ", ".join(str(v) for v in top_death_rounds)
+        stats_lines.append(f"Rounds with most deaths: {rounds_list}")
     if common_death_weapon:
-        stats_lines.append(f"Most killed by: {common_death_weapon}")
+        stats_lines.append(f"Most killed by weapon: {common_death_weapon}")
     if death_headshot_rate is not None:
         stats_lines.append(f"Death HS rate (killed by HS): {death_headshot_rate}%")
+    if avg_death_time_sec is not None:
+        stats_lines.append(f"Avg death time into round: {avg_death_time_sec}s")
+    if median_death_time_sec is not None:
+        stats_lines.append(f"Median death time into round: {median_death_time_sec}s")
+    if avg_death_distance is not None:
+        stats_lines.append(f"Avg death distance from attacker: {avg_death_distance} units")
+
+    # ── Round flow: score progression + win reasons ──
+    if rounds_history:
+        stats_lines.append("")
+        stats_lines.append("-- Round-by-Round Score/Flow --")
+        reason_map = {
+            "1": "Target Bombed",
+            "7": "Bomb Defused",
+            "8": "CT Elimination",
+            "9": "T Elimination",
+            "12": "Time Ran Out",
+            "17": "T Surrender",
+            "18": "CT Surrender",
+        }
+        for rh in rounds_history:
+            rn = rh.get("round_number", "?")
+            ws = rh.get("winner_side", "?")
+            raw_reason = rh.get("reason")
+            reason = reason_map.get(str(raw_reason), raw_reason) if raw_reason else ""
+            ct_s = rh.get("ct_score", "?")
+            t_s = rh.get("t_score", "?")
+            rline = f"Round {rn}: {ws} wins"
+            if reason:
+                rline += f" - {reason}"
+            rline += f" (CT-team {ct_s}, T-team {t_s})"
+            stats_lines.append(rline)
 
     # ── Teammate/enemy scoreboard context ──
     teammates = []
@@ -1802,7 +1867,9 @@ def get_ai_coaching_tip(
         line = (
             f"{p.get('player_name') or p.get('steam_id')}: "
             f"{p.get('kills',0)}K/{p.get('deaths',0)}D/{p.get('assists',0)}A "
-            f"ADR:{p.get('adr',0)} HS:{p.get('hs_percent',0)}%"
+            f"ADR:{p.get('adr',0)} HS:{p.get('hs_percent',0)}% "
+            f"Opening:{p.get('opening_kills',0)}OK/{p.get('opening_deaths',0)}OD "
+            f"Trades:{p.get('trade_kills',0)} UtilDmg:{p.get('utility_damage',0)}"
         )
         if user_team_side and p.get("team_side") == user_team_side:
             teammates.append(line)
@@ -1811,31 +1878,25 @@ def get_ai_coaching_tip(
 
     if teammates:
         stats_lines.append("")
-        stats_lines.append("-- Teammates --")
+        stats_lines.append("-- Teammates (full scoreboard) --")
         stats_lines.extend(f"  {t}" for t in teammates)
     if enemies:
         stats_lines.append("")
-        stats_lines.append("-- Opponents --")
+        stats_lines.append("-- Opponents (full scoreboard) --")
         stats_lines.extend(f"  {e}" for e in enemies)
 
-    # ── Extra contextual facts ──
+    # ── Economy data ──
     facts_lines: List[str] = []
-    if avg_death_time_sec is not None:
-        facts_lines.append(f"Avg death time into round: {avg_death_time_sec}s")
-    if median_death_time_sec is not None:
-        facts_lines.append(f"Median death time into round: {median_death_time_sec}s")
-    if avg_death_distance is not None:
-        facts_lines.append(f"Avg death distance: {avg_death_distance} units")
     if buy_summary:
         ct_buy = buy_summary.get("CT", {})
         t_buy = buy_summary.get("T", {})
         if ct_buy:
             facts_lines.append(
-                "CT economy: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
+                "CT economy rounds: " + ", ".join(f"{k}={v}" for k, v in ct_buy.items())
             )
         if t_buy:
             facts_lines.append(
-                "T economy: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
+                "T economy rounds: " + ", ".join(f"{k}={v}" for k, v in t_buy.items())
             )
 
     style_value = (style or "narrative").strip().lower()
@@ -1854,14 +1915,46 @@ def get_ai_coaching_tip(
         style_prompt = "Give advice in 1-2 sentences maximum. Be direct."
     else:
         style_prompt = (
-            "Structure the report as follows:\n"
-            "1. A one-line match summary header with the map, result and score.\n"
-            "2. Section: THE GOOD - what the player did well (reference specific rounds, multi-kills, clutches).\n"
-            "3. Section: THE BAD - what went wrong (reference specific death rounds, weak stats).\n"
-            "4. Section: THE FIX - 2-3 actionable tips with concrete advice.\n"
-            "Use emojis to mark each section. "
-            "Reference specific round numbers when discussing multi-kills, clutches, or deaths. "
-            "Keep it concise but impactful."
+            "Write a DEEP, DETAILED coaching analysis as if you are the player's personal coach reviewing their VOD.\n"
+            "This is NOT a summary — it is in-depth coaching. Use EVERY piece of data provided. Be thorough.\n\n"
+            "Structure the response like this:\n\n"
+            "1. MATCH OVERVIEW — One-line header with map, result, score. Then a 2-3 sentence narrative of how the match played out "
+            "(reference the round-by-round score flow: when they took leads, lost momentum, had comeback runs, or collapsed).\n\n"
+            "2. ROUND-BY-ROUND STORY — Walk through the key moments of the match chronologically. "
+            "Group consecutive rounds into phases (e.g., 'Rounds 1-4: strong CT start' or 'Rounds 8-12: the collapse'). "
+            "For each phase, mention:\n"
+            "  - What the player did (kills, deaths, survived or died)\n"
+            "  - Opening duels won or lost in those rounds\n"
+            "  - Multi-kills or clutches that happened\n"
+            "  - How the score shifted\n"
+            "  - Round end reasons (bomb plant, elimination, defuse, time) and what that says about playstyle\n\n"
+            "3. TIMING AND POSITIONING ANALYSIS — Use the death timing data:\n"
+            "  - If avg death time is low (under 30s), the player is over-peeking or dying to early aggression\n"
+            "  - If avg death time is high (over 60s), the player is passive but dying in late-round scrambles\n"
+            "  - Analyze death distance: close range = bad positioning, long range = getting picked\n"
+            "  - What weapon they keep dying to and what that reveals about their positioning\n\n"
+            "4. SIDE BREAKDOWN — Compare CT vs T performance in detail.\n"
+            "  - Which side were they stronger on? Why?\n"
+            "  - Did they contribute differently on attack vs defense?\n\n"
+            "5. COMPARED TO OTHERS — Compare the player's stats to their teammates and opponents.\n"
+            "  - ADR ranking within team\n"
+            "  - Who had better opening duels, trade kills, utility damage?\n"
+            "  - Was the player carried or carrying?\n"
+            "  - Identify the enemy player who caused the most damage and what to learn from it\n\n"
+            "6. ECONOMY OBSERVATIONS — If economy data is available, comment on buy patterns "
+            "(too many ecos? too many force buys? proper full buys?).\n\n"
+            "7. WHAT WENT WELL — Specific praise with round numbers. Clutches, multi-kills, high-impact rounds.\n\n"
+            "8. WHAT WENT WRONG — Specific criticism with round numbers. Death streaks, "
+            "opening duel losses, low-impact rounds where the player had 0 kills and died.\n\n"
+            "9. COACHING PLAN — 4-6 specific, actionable improvements:\n"
+            "  - Reference the exact situations from THIS match\n"
+            "  - Give concrete numbers (e.g., 'stay within 5-8 units of a teammate for trade potential')\n"
+            "  - Suggest specific positions, angles, or timing adjustments for the MAP played\n"
+            "  - Address the weapon they keep dying to with counter-play advice\n"
+            "  - If utility damage is low, suggest specific utility lineups for the map\n\n"
+            "Be honest and direct. Don't sugarcoat. Use the tone of a real coach in a post-match review.\n"
+            "Reference specific round numbers throughout — do NOT speak in generalities.\n"
+            "The message can be as LONG as needed to cover everything. Do not cut corners."
         )
 
     language_prompt = ""
@@ -1879,35 +1972,45 @@ def get_ai_coaching_tip(
             "- Start the message with a right-to-left mark.\n"
             "- Translate map names: de_dust2 = دست 2, de_nuke = نوك, de_ancient = انشنت, "
             "de_mirage = ميراج, de_inferno = انفيرنو, de_anubis = انوبيس, de_vertigo = فيرتيجو.\n"
-            "- Keep section headers short and clear."
+            "- Keep section headers short and clear.\n"
+            "- Use emojis to mark each section header."
         )
     else:
         language_prompt = "Output the entire response in English."
 
     prompt = (
-        "You are a CS2 coach sending a match analysis via Steam chat message. "
-        "All the stats below are extracted directly from the demo file and are accurate. "
-        "Reference specific numbers from the data: K/D, ADR, HS%, opening duels, scores. "
-        "Reference SPECIFIC ROUND NUMBERS when discussing multi-kills, clutches, or deaths. "
-        "Compare the player to their teammates and opponents when relevant. "
-        "If the player lost, focus on what they can improve. If they won, highlight what worked and what could be better. "
-        "Do not guess about economy or round type; only reference provided data. "
-        "IMPORTANT: This is a Steam chat message, NOT a web page. "
-        "Do NOT use markdown headers ### or **bold**. "
-        "Use simple text formatting only: dashes for bullets, line breaks for sections. "
-        "Keep the total message under 1500 characters so it reads well in Steam chat.\n\n"
+        "You are an elite CS2 coach performing a detailed post-match review for your student. "
+        "You have FULL access to the demo file stats below — every number is real, nothing is estimated. "
+        "Your job is to analyze this match deeply, cover every mistake, praise every good play, "
+        "and give coaching that references SPECIFIC ROUNDS and SPECIFIC NUMBERS.\n\n"
+        "CRITICAL RULES:\n"
+        "- This is a Steam chat message, NOT a web page.\n"
+        "- Do NOT use markdown: no ### headers, no **bold**, no *italics*.\n"
+        "- Use simple text: emojis for section markers, dashes - for bullet points, line breaks for structure.\n"
+        "- Use ALL the data provided — round flow, death timing, weapons, teammate comparison, economy.\n"
+        "- Be thorough. The player wants to understand EXACTLY what happened and what to fix.\n"
+        "- Do NOT fabricate data. Only reference what is provided below.\n"
+        "- The message can be long — there is no character limit. Cover everything.\n\n"
         + style_prompt
         + "\n\n"
         + language_prompt
         + "\n\nMatch Stats (from demo):\n"
         + "\n".join(stats_lines)
-        + ("\n\nAdditional Facts:\n- " + "\n- ".join(facts_lines) if facts_lines else "")
+        + ("\n\nEconomy Data:\n- " + "\n- ".join(facts_lines) if facts_lines else "")
     )
 
     try:
         completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a professional CS2 Coach."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an elite professional CS2 Coach with years of experience coaching "
+                        "at the highest level. You analyze demos in extreme detail and leave no stone unturned. "
+                        "Your reviews are honest, data-driven, and actionable. You reference specific round numbers "
+                        "and exact statistics. You never give vague advice."
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
