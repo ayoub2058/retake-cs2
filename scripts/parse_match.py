@@ -1630,6 +1630,52 @@ def parse_stats(
         if not user_starting_side:
             user_starting_side = resolve_starting_side(target_steam_id)
 
+    # ── Cross-validate: team kill totals should match their round wins ──
+    # If the team with MORE total kills has FEWER round wins, the side labels
+    # are inverted.  Flip all player sides + user_starting_side.
+    if (user_starting_side and score_ct is not None and score_t is not None
+            and score_ct != score_t and player_stats):
+        user_team_total_kills = sum(
+            p.get("kills", 0) for p in player_stats
+            if p.get("team_side") == user_starting_side
+        )
+        enemy_team_total_kills = sum(
+            p.get("kills", 0) for p in player_stats
+            if p.get("team_side") != user_starting_side
+            and p.get("team_side") in ("CT", "T")
+        )
+        if user_starting_side == "CT":
+            user_team_score = score_ct
+        else:
+            user_team_score = score_t
+        enemy_team_score = (score_ct + score_t) - user_team_score
+
+        # Mismatch: more kills but fewer round wins → side labels are inverted
+        needs_flip = False
+        if (user_team_total_kills > enemy_team_total_kills
+                and user_team_score < enemy_team_score):
+            needs_flip = True
+        elif (user_team_total_kills < enemy_team_total_kills
+                and user_team_score > enemy_team_score):
+            needs_flip = True
+
+        if needs_flip:
+            flipped = "T" if user_starting_side == "CT" else "CT"
+            print(
+                f"SIDE-FIX: Flipping user side from {user_starting_side} to {flipped} "
+                f"(team kills {user_team_total_kills} vs enemy {enemy_team_total_kills}, "
+                f"score {user_team_score} vs {enemy_team_score})"
+            )
+            user_starting_side = flipped
+            for p in player_stats:
+                old = p.get("team_side")
+                if old == "CT":
+                    p["team_side"] = "T"
+                    p["player_team"] = "T"
+                elif old == "T":
+                    p["team_side"] = "CT"
+                    p["player_team"] = "CT"
+
     return {
         "kills": kills,
         "deaths": deaths,
@@ -1936,46 +1982,38 @@ def get_ai_coaching_tip(
         style_prompt = "Give advice in 1-2 sentences maximum. Be direct."
     else:
         style_prompt = (
-            "Write a DEEP, DETAILED coaching analysis as if you are the player's personal coach reviewing their VOD.\n"
-            "This is NOT a summary — it is in-depth coaching. Use EVERY piece of data provided. Be thorough.\n\n"
+            "IMPORTANT: The player has ALREADY received a visual stats card with all their numbers "
+            "(K/D, ADR, HS%, scoreboard, round timeline, death analysis). "
+            "Do NOT repeat or recite any stats. Do NOT create a stats summary. "
+            "Your ONLY job is to provide COACHING — analyze what went wrong and how to fix it.\n\n"
             "Structure the response like this:\n\n"
-            "1. MATCH OVERVIEW — One-line header with map, result, score. Then a 2-3 sentence narrative of how the match played out "
-            "(reference the round-by-round score flow: when they took leads, lost momentum, had comeback runs, or collapsed).\n\n"
-            "2. ROUND-BY-ROUND STORY — Walk through the key moments of the match chronologically. "
-            "Group consecutive rounds into phases (e.g., 'Rounds 1-4: strong CT start' or 'Rounds 8-12: the collapse'). "
-            "For each phase, mention:\n"
-            "  - What the player did (kills, deaths, survived or died)\n"
-            "  - Opening duels won or lost in those rounds\n"
-            "  - Multi-kills or clutches that happened\n"
-            "  - How the score shifted\n"
-            "  - Round end reasons (bomb plant, elimination, defuse, time) and what that says about playstyle\n\n"
-            "3. TIMING AND POSITIONING ANALYSIS — Use the death timing data:\n"
-            "  - If avg death time is low (under 30s), the player is over-peeking or dying to early aggression\n"
-            "  - If avg death time is high (over 60s), the player is passive but dying in late-round scrambles\n"
-            "  - Analyze death distance: close range = bad positioning, long range = getting picked\n"
-            "  - What weapon they keep dying to and what that reveals about their positioning\n\n"
-            "4. SIDE BREAKDOWN — Compare CT vs T performance in detail.\n"
-            "  - Which side were they stronger on? Why?\n"
-            "  - Did they contribute differently on attack vs defense?\n\n"
-            "5. COMPARED TO OTHERS — Compare the player's stats to their teammates and opponents.\n"
-            "  - ADR ranking within team\n"
-            "  - Who had better opening duels, trade kills, utility damage?\n"
-            "  - Was the player carried or carrying?\n"
-            "  - Identify the enemy player who caused the most damage and what to learn from it\n\n"
-            "6. ECONOMY OBSERVATIONS — If economy data is available, comment on buy patterns "
-            "(too many ecos? too many force buys? proper full buys?).\n\n"
-            "7. WHAT WENT WELL — Specific praise with round numbers. Clutches, multi-kills, high-impact rounds.\n\n"
-            "8. WHAT WENT WRONG — Specific criticism with round numbers. Death streaks, "
-            "opening duel losses, low-impact rounds where the player had 0 kills and died.\n\n"
-            "9. COACHING PLAN — 4-6 specific, actionable improvements:\n"
-            "  - Reference the exact situations from THIS match\n"
-            "  - Give concrete numbers (e.g., 'stay within 5-8 units of a teammate for trade potential')\n"
-            "  - Suggest specific positions, angles, or timing adjustments for the MAP played\n"
-            "  - Address the weapon they keep dying to with counter-play advice\n"
-            "  - If utility damage is low, suggest specific utility lineups for the map\n\n"
-            "Be honest and direct. Don't sugarcoat. Use the tone of a real coach in a post-match review.\n"
+            "1. MATCH STORY — A short narrative of how the match unfolded. "
+            "Group rounds into phases (e.g., 'Rounds 1-4: strong start' or 'Rounds 8-12: momentum lost'). "
+            "For each phase, explain what the player did right or wrong and how the score shifted.\n\n"
+            "2. ROUND-BY-ROUND MISTAKES — Go through EVERY round where the player died. "
+            "For each death round, explain:\n"
+            "  - When they died (early = over-peeking, late = caught in rotation)\n"
+            "  - What weapon killed them and what that says about their positioning\n"
+            "  - What they should have done differently\n"
+            "  - If they had 0 kills that round, call it out as a zero-impact round\n\n"
+            "3. TIMING AND POSITIONING — Based on the avg death time and distance:\n"
+            "  - If dying early: too aggressive, over-peeking, bad utility usage\n"
+            "  - If dying late: bad rotation timing, caught off guard in retakes\n"
+            "  - What the kill weapon reveals about their positioning mistakes\n\n"
+            "4. COMPARED TO TEAMMATES — Without reciting numbers:\n"
+            "  - Was the player carrying or being carried?\n"
+            "  - Who on the team was more impactful and why?\n"
+            "  - Did the player support their team with trades and utility?\n\n"
+            "5. COACHING PLAN — 4-6 specific, actionable improvements:\n"
+            "  - Reference exact rounds from THIS match as examples\n"
+            "  - Give concrete advice for the specific MAP played\n"
+            "  - Suggest specific positions, angles, or timing changes\n"
+            "  - Address the weapon they keep dying to with counter-play\n"
+            "  - If they had low opening duel wins, give peeking advice\n"
+            "  - If utility damage was low, suggest specific util lineups for the map\n\n"
+            "Be honest, direct, and constructive. Talk like a real coach in a post-match VOD review.\n"
             "Reference specific round numbers throughout — do NOT speak in generalities.\n"
-            "The message can be as LONG as needed to cover everything. Do not cut corners."
+            "The message can be long. Cover every mistake."
         )
 
     language_prompt = ""
@@ -2000,18 +2038,20 @@ def get_ai_coaching_tip(
         language_prompt = "Output the entire response in English."
 
     prompt = (
-        "You are an elite CS2 coach performing a detailed post-match review for your student. "
-        "You have FULL access to the demo file stats below — every number is real, nothing is estimated. "
-        "Your job is to analyze this match deeply, cover every mistake, praise every good play, "
-        "and give coaching that references SPECIFIC ROUNDS and SPECIFIC NUMBERS.\n\n"
+        "You are an elite CS2 coach reviewing a match for your student via Steam chat. "
+        "The player has ALREADY received a visual stats card showing all their numbers — "
+        "K/D, ADR, HS%, scoreboard, round timeline, death analysis. "
+        "Do NOT repeat those stats. Your job is PURE COACHING.\n\n"
         "CRITICAL RULES:\n"
-        "- This is a Steam chat message, NOT a web page.\n"
-        "- Do NOT use markdown: no ### headers, no **bold**, no *italics*.\n"
-        "- Use simple text: emojis for section markers, dashes - for bullet points, line breaks for structure.\n"
-        "- Use ALL the data provided — round flow, death timing, weapons, teammate comparison, economy.\n"
-        "- Be thorough. The player wants to understand EXACTLY what happened and what to fix.\n"
+        "- Do NOT recite or summarize stats (the player already sees them in the image).\n"
+        "- Focus ONLY on: what went wrong, why, and how to fix it.\n"
+        "- This is a Steam chat message — no markdown (no ### or **bold**).\n"
+        "- Use emojis for section markers, dashes - for bullets, line breaks for structure.\n"
+        "- Reference SPECIFIC ROUND NUMBERS for every point you make.\n"
+        "- Analyze every death round: explain *why* the player died and what to do differently.\n"
         "- Do NOT fabricate data. Only reference what is provided below.\n"
-        "- The message can be long — there is no character limit. Cover everything.\n\n"
+        "- Do NOT include any URLs or links.\n"
+        "- The message can be long. Cover every mistake and improvement.\n\n"
         + style_prompt
         + "\n\n"
         + language_prompt
@@ -2026,10 +2066,10 @@ def get_ai_coaching_tip(
                 {
                     "role": "system",
                     "content": (
-                        "You are an elite professional CS2 Coach with years of experience coaching "
-                        "at the highest level. You analyze demos in extreme detail and leave no stone unturned. "
-                        "Your reviews are honest, data-driven, and actionable. You reference specific round numbers "
-                        "and exact statistics. You never give vague advice."
+                        "You are an elite professional CS2 Coach. The player already sees a visual stats card "
+                        "with all numbers. You provide ONLY coaching analysis — mistakes, timing, positioning, "
+                        "and actionable improvement advice. You reference specific round numbers and never give "
+                        "vague tips. You never include URLs or links in your messages."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -2044,27 +2084,9 @@ def get_ai_coaching_tip(
     # Remove any markdown formatting the model might have included
     response_text = response_text.replace("**", "").replace("###", "").replace("##", "").replace("# ", "")
 
-    # ── Append match detail link ──
-    match_link = ""
-    if match_id is not None:
-        base_url = os.getenv("NEXT_PUBLIC_BASE_URL", "https://retake-cs2.vercel.app")
-        match_url = f"{base_url}/dashboard/matches/{match_id}"
-        if language_value == "arabic":
-            match_link = (
-                f"\n\n\u200F\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                f"\U0001f4ca \u0634\u0648\u0641 \u0625\u062d\u0635\u0627\u0626\u064a\u0627\u062a\u0643 \u0627\u0644\u0643\u0627\u0645\u0644\u0629 \u0647\u0646\u0627\n"
-                f"{match_url}"
-            )
-        else:
-            match_link = (
-                f"\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                f"\U0001f4ca View your full match stats here\n"
-                f"{match_url}"
-            )
-
     if language_value == "arabic":
-        return f"\u200F{response_text}{match_link}"
-    return f"{response_text}{match_link}"
+        return f"\u200F{response_text}"
+    return response_text
 
 
 def parse_match_logic(

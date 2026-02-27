@@ -477,13 +477,15 @@ const sendPendingMessages = async () => {
       try {
         // Send stats card image first (if available)
         if (row.tip_image_url) {
+          const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
+          const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
           client.chat.sendFriendMessage(
             steamId,
-            `📊 Match ${row.id} Stats Card:\n${row.tip_image_url}`
+            `📊 Match ${row.id} Stats Card:\n${row.tip_image_url}\n\n🔗 Full stats: ${matchUrl}`
           );
-          await sleep(1000);
+          await sleep(1500);
         }
-        // Then send the AI coaching narrative
+        // Then send the AI coaching narrative (no URLs — pure coaching)
         client.chat.sendFriendMessage(steamId, row.coach_tip);
         await markTipSent(row.id);
         sent++;
