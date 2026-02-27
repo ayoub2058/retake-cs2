@@ -477,7 +477,7 @@ const sendPendingMessages = async () => {
       try {
         // 1) Send stats card image URL alone so Steam auto-embeds it as an image
         if (row.tip_image_url) {
-          client.chat.sendFriendMessage(steamId, row.tip_image_url);
+          await client.chat.sendFriendMessage(steamId, row.tip_image_url);
           await sleep(2000);
         }
 
@@ -485,31 +485,35 @@ const sendPendingMessages = async () => {
         const STEAM_MAX = 4500;
         const tipText = row.coach_tip || "";
         if (tipText.length > 0) {
+          log("Tip", `Coach tip for match ${row.id}: ${tipText.length} chars`);
           if (tipText.length <= STEAM_MAX) {
-            client.chat.sendFriendMessage(steamId, tipText);
+            await client.chat.sendFriendMessage(steamId, tipText);
+            await sleep(2000);
           } else {
             // Split on double-newlines (section breaks) to keep sections intact
             const sections = tipText.split(/\n\n/);
             let chunk = "";
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
-                client.chat.sendFriendMessage(steamId, chunk.trim());
-                await sleep(1500);
+                await client.chat.sendFriendMessage(steamId, chunk.trim());
+                await sleep(2000);
                 chunk = "";
               }
               chunk += (chunk ? "\n\n" : "") + section;
             }
             if (chunk.trim()) {
-              client.chat.sendFriendMessage(steamId, chunk.trim());
-              await sleep(1500);
+              await client.chat.sendFriendMessage(steamId, chunk.trim());
+              await sleep(2000);
             }
           }
+        } else {
+          log("Tip", `WARNING: coach_tip is empty for match ${row.id}`);
         }
 
         // 3) Send match stats link as the last message
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
-        client.chat.sendFriendMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+        await client.chat.sendFriendMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
 
         await markTipSent(row.id);
         sent++;
