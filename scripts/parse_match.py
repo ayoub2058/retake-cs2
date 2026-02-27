@@ -2069,12 +2069,14 @@ def get_ai_coaching_tip(
                         "You are an elite professional CS2 Coach. The player already sees a visual stats card "
                         "with all numbers. You provide ONLY coaching analysis — mistakes, timing, positioning, "
                         "and actionable improvement advice. You reference specific round numbers and never give "
-                        "vague tips. You never include URLs or links in your messages."
+                        "vague tips. You never include URLs or links in your messages. "
+                        "Keep the total response under 4000 characters so it fits in a single Steam message."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
+            max_tokens=1500,
         )
     except Exception as exc:
         raise RuntimeError(f"Groq request failed: {exc}") from exc

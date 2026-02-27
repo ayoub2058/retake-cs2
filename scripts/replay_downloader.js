@@ -475,21 +475,45 @@ const sendPendingMessages = async () => {
       }
 
       try {
-        // Send stats card image first (if available)
+        // 1) Send stats card image URL alone so Steam auto-embeds it as an image
         if (row.tip_image_url) {
-          const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
-          const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
-          client.chat.sendFriendMessage(
-            steamId,
-            `📊 Match ${row.id} Stats Card:\n${row.tip_image_url}\n\n🔗 Full stats: ${matchUrl}`
-          );
-          await sleep(1500);
+          client.chat.sendFriendMessage(steamId, row.tip_image_url);
+          await sleep(2000);
         }
-        // Then send the AI coaching narrative (no URLs — pure coaching)
-        client.chat.sendFriendMessage(steamId, row.coach_tip);
+
+        // 2) Send the AI coaching tip — split into chunks if too long for Steam (~5000 char limit)
+        const STEAM_MAX = 4500;
+        const tipText = row.coach_tip || "";
+        if (tipText.length > 0) {
+          if (tipText.length <= STEAM_MAX) {
+            client.chat.sendFriendMessage(steamId, tipText);
+          } else {
+            // Split on double-newlines (section breaks) to keep sections intact
+            const sections = tipText.split(/\n\n/);
+            let chunk = "";
+            for (const section of sections) {
+              if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
+                client.chat.sendFriendMessage(steamId, chunk.trim());
+                await sleep(1500);
+                chunk = "";
+              }
+              chunk += (chunk ? "\n\n" : "") + section;
+            }
+            if (chunk.trim()) {
+              client.chat.sendFriendMessage(steamId, chunk.trim());
+              await sleep(1500);
+            }
+          }
+        }
+
+        // 3) Send match stats link as the last message
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
+        const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
+        client.chat.sendFriendMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+
         await markTipSent(row.id);
         sent++;
-        log("Tip", `Sent coach tip for match ${row.id} (${sent} this cycle).`);
+        log("Tip", `Sent coach tip for match ${row.id} — ${tipText.length} chars (${sent} this cycle).`);
       } catch (error) {
         console.warn(`Failed to send tip to ${steamId}:`, error);
         // Revert so we retry next cycle
