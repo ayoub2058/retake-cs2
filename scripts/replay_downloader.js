@@ -389,7 +389,7 @@ const claimNextTip = async () => {
     const result = await db.query(
       `
       with tip as (
-        select id, user_id, coach_tip
+        select id, user_id, coach_tip, tip_image_url
         from public.matches_to_download
         where status in ('processed', 'parsed')
           and coach_tip is not null
@@ -402,6 +402,7 @@ const claimNextTip = async () => {
         tip.id,
         tip.user_id,
         tip.coach_tip,
+        tip.tip_image_url,
         coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id
       from tip
       left join public.users u on u.steam_id::text = tip.user_id::text
@@ -474,6 +475,15 @@ const sendPendingMessages = async () => {
       }
 
       try {
+        // Send stats card image first (if available)
+        if (row.tip_image_url) {
+          client.chat.sendFriendMessage(
+            steamId,
+            `📊 Match ${row.id} Stats Card:\n${row.tip_image_url}`
+          );
+          await sleep(1000);
+        }
+        // Then send the AI coaching narrative
         client.chat.sendFriendMessage(steamId, row.coach_tip);
         await markTipSent(row.id);
         sent++;

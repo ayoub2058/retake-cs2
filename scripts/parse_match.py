@@ -22,6 +22,21 @@ from awpy.demo import DemoParser
 import pandas as pd
 from sqlalchemy.pool import QueuePool
 
+# Import stats_card from the same directory as this script
+import importlib.util as _ilu
+_stats_card_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats_card.py")
+if os.path.exists(_stats_card_path):
+    _spec = _ilu.spec_from_file_location("stats_card", _stats_card_path)
+    _mod = _ilu.module_from_spec(_spec)
+    try:
+        _spec.loader.exec_module(_mod)
+        generate_stats_image = _mod.generate_stats_image
+    except Exception as _e:
+        print(f"Warning: could not load stats_card module: {_e}")
+        generate_stats_image = None
+else:
+    generate_stats_image = None
+
 load_dotenv(".env.local")
 load_dotenv()
 
@@ -93,16 +108,22 @@ def fetch_matches(
     return cursor.fetchall()
 
 
-def mark_parsed(cursor: RealDictCursor, match_id: int, tip: str) -> None:
+def mark_parsed(
+    cursor: RealDictCursor,
+    match_id: int,
+    tip: str,
+    tip_image_url: Optional[str] = None,
+) -> None:
     cursor.execute(
         """
         update public.matches_to_download
         set coach_tip = %s,
+            tip_image_url = %s,
             tip_sent = false,
             status = 'processed'
         where id = %s
         """,
-        (tip, match_id),
+        (tip, tip_image_url, match_id),
     )
 
 
@@ -2081,7 +2102,16 @@ def parse_match_logic(
                 tip = get_ai_coaching_tip(stats, language, coach_style, match_id=match_id_value)
                 if not tip:
                     raise RuntimeError("Coach tip was empty")
-                mark_parsed(cursor, match_id_value, tip)
+
+                # Generate stats card image (non-blocking — failure won't stop the tip)
+                tip_image_url = None
+                if generate_stats_image is not None:
+                    try:
+                        tip_image_url = generate_stats_image(stats, match_id=match_id_value)
+                    except Exception as img_exc:
+                        log(f"Stats card generation failed for match {match_id_value}: {img_exc}")
+
+                mark_parsed(cursor, match_id_value, tip, tip_image_url=tip_image_url)
                 db_conn.commit()
                 return match_id_value, True, None
             except Exception as exc:
