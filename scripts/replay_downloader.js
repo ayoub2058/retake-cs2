@@ -475,6 +475,16 @@ const sendPendingMessages = async () => {
       }
 
       try {
+        // Double-check the row hasn't already been sent (guards against pm2 restart overlap)
+        const guard = await pool.query(
+          `SELECT tip_sent, status FROM public.matches_to_download WHERE id = $1`,
+          [row.id]
+        );
+        if (guard.rows[0]?.status === "notified") {
+          log("Tip", `Match ${row.id} already notified — skipping duplicate send.`);
+          continue;
+        }
+
         // 1) Send stats card image URL alone so Steam auto-embeds it as an image
         if (row.tip_image_url) {
           await client.chat.sendFriendMessage(steamId, row.tip_image_url);
