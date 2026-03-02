@@ -1,0 +1,232 @@
+/* RetakeAI Chrome Extension – Popup Styles */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 360px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  background: #0b0d0f;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+}
+
+.popup {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ─────────────────────────────── */
+
+.header {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, rgba(213, 255, 76, 0.04) 0%, transparent 100%);
+}
+
+.logo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(213, 255, 76, 0.1);
+  border: 1px solid rgba(213, 255, 76, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+
+.subtitle {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.25em;
+  color: rgba(255, 255, 255, 0.35);
+  margin-top: 1px;
+}
+
+/* ── Section ────────────────────────────── */
+
+.section {
+  padding: 16px 20px;
+}
+
+.section-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.35em;
+  color: rgba(255, 255, 255, 0.35);
+  margin-bottom: 12px;
+}
+
+/* ── Code Cards ─────────────────────────── */
+
+.code-card {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.code-card.has-value {
+  border-color: rgba(213, 255, 76, 0.2);
+  background: rgba(213, 255, 76, 0.04);
+}
+
+.code-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: rgba(255, 255, 255, 0.4);
+  margin-bottom: 6px;
+}
+
+.code-value {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  color: rgba(255, 255, 255, 0.6);
+  word-break: break-all;
+  user-select: all;
+  cursor: text;
+}
+
+.code-card.has-value .code-value {
+  color: #d5ff4c;
+}
+
+.timestamp {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.25);
+  margin-top: 4px;
+  text-align: right;
+}
+
+/* ── Buttons ────────────────────────────── */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-radius: 10px;
+  padding: 11px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary {
+  background: #d5ff4c;
+  color: #000;
+}
+
+.btn-primary:hover {
+  background: #c4f03c;
+  box-shadow: 0 0 20px rgba(213, 255, 76, 0.2);
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.btn-ghost:hover {
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* ── Footer ─────────────────────────────── */
+
+.footer {
+  padding: 14px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.footer-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.footer-hint svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── Status Messages ────────────────────── */
+
+.status-msg {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 10px 14px;
+  border-radius: 10px;
+  line-height: 1.4;
+}
+
+.status-info {
+  color: rgba(103, 245, 255, 0.9);
+  background: rgba(103, 245, 255, 0.08);
+  border: 1px solid rgba(103, 245, 255, 0.15);
+}
+
+.status-success {
+  color: rgba(213, 255, 76, 0.95);
+  background: rgba(213, 255, 76, 0.08);
+  border: 1px solid rgba(213, 255, 76, 0.2);
+}
+
+.status-error {
+  color: rgba(255, 113, 113, 0.95);
+  background: rgba(255, 113, 113, 0.08);
+  border: 1px solid rgba(255, 113, 113, 0.15);
+}
+
+.btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
