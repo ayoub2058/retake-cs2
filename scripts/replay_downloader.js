@@ -452,7 +452,7 @@ const sendSteamMessage = async (steamId, message) => {
  * so that concurrent instances / restarts never send the same tip twice.
  * Returns null when there is nothing to send.
  */
-const claimNextTip = async () => {
+const claimNextTip = async (excludeIds = []) => {
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
@@ -467,6 +467,7 @@ const claimNextTip = async () => {
         where status in ('processed', 'parsed')
           and coach_tip is not null
           and (tip_sent is null or tip_sent = false)
+          and id != ALL($1::int[])
         order by id asc
         limit 1
         for update skip locked
@@ -479,7 +480,8 @@ const claimNextTip = async () => {
         coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id
       from tip
       left join public.users u on u.steam_id::text = tip.user_id::text
-      `
+      `,
+      [excludeIds]
     );
     if (!result.rows.length) {
       await db.query("COMMIT");
@@ -586,6 +588,7 @@ const sendPendingMessages = async () => {
   } catch (_) { /* non-critical */ }
 
   const skippedIds = new Set();  // track IDs we can't deliver this cycle
+  const skippedSteamIds = new Set();  // track users we already sent friend requests to
   let currentClaimedId = null;   // track currently claimed tip for safety revert
   try {
     // Process tips one-at-a-time with atomic claim
@@ -594,19 +597,12 @@ const sendPendingMessages = async () => {
     const MAX_FAILURES_PER_CYCLE = 3;  // stop cycling after N consecutive failures
     while (true) {
       currentClaimedId = null;
-      const row = await claimNextTip();
+      const row = await claimNextTip([...skippedIds]);
       if (!row) {
         log("Tip", "No more pending tips to claim.");
         break;
       }
       currentClaimedId = row.id;
-
-      // ── Guard: already tried this ID this cycle (prevents infinite loop) ──
-      if (skippedIds.has(row.id)) {
-        await revertTipClaim(row.id);
-        currentClaimedId = null;
-        break;  // we've looped back → stop
-      }
 
       const steamId = row.user_steam_id;
       log("Tip", `Claimed match ${row.id} for steam ${steamId} (user_id=${row.user_id})`);
@@ -617,22 +613,20 @@ const sendPendingMessages = async () => {
       log("Tip", `  canMessageUser check: directLookup=${directLookup}, friendKeys.length=${friendKeys.length}`);
 
       if (!canMessageUser(steamId)) {
-        // Log all friend keys for debugging (first match skip only)
-        if (skippedIds.size === 0) {
-          const fkeys = friendKeys.slice(0, 10);
-          log("Tip", `  Cannot message ${steamId} — not on friends list.`);
-          log("Tip", `  Sample friend keys: [${fkeys.map(k => `"${k}"`).join(", ") || "<empty>"}]`);
-          // Try to explain the format
-          if (fkeys.length > 0 && fkeys[0].startsWith("[")) {
-            log("Tip", `  Keys are Steam3 format. Trying conversion...`);
-            try {
-              const accountId = BigInt(steamId) - 76561197960265728n;
-              log("Tip", `  Expected Steam3 key: [U:1:${accountId}]`);
-            } catch (_) {}
+        log("Tip", `  Cannot message ${steamId} — not on friends list.`);
+
+        // Auto-send friend request (once per user per cycle)
+        if (!skippedSteamIds.has(steamId)) {
+          skippedSteamIds.add(steamId);
+          try {
+            log("Tip", `  Sending friend request to ${steamId}...`);
+            client.addFriend(steamId);
+            log("Tip", `  Friend request sent to ${steamId}. Will retry delivery after they accept.`);
+          } catch (frErr) {
+            log("Tip", `  Failed to send friend request to ${steamId}: ${frErr.message}`);
           }
-        } else {
-          log("Tip", `  Cannot message ${steamId} — will retry next cycle.`);
         }
+
         skippedIds.add(row.id);
         await revertTipClaim(row.id);
         currentClaimedId = null;
@@ -917,11 +911,20 @@ client.on("friendsList", () => {
 });
 
 client.on("error", (error) => {
-  console.error("[Steam] Client error:", error.message || error);
+  const msg = error.message || String(error);
+  console.error("[Steam] Client error:", msg);
   steamReady = false;
   gcReady = false;
   if (!disconnectedSince) {
     disconnectedSince = Date.now();
+  }
+
+  // LogonSessionReplaced means another login kicked us — exit immediately
+  // so pm2 restarts fresh (reconnecting after this error always fails).
+  if (msg === "LogonSessionReplaced" || error.eresult === 34) {
+    log("Steam", "Session replaced by another login. Exiting for pm2 restart in 30s...");
+    setTimeout(() => process.exit(1), 30_000);
+    return;
   }
 
   loginAttempts += 1;
