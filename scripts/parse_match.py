@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from groq import Groq
 from awpy.demo import DemoParser
+from awpy import Demo as AwpyDemo
 import pandas as pd
 from sqlalchemy.pool import QueuePool
 
@@ -422,6 +423,77 @@ def parse_stats(
     except TypeError:
         parser = DemoParser(demo_path)
 
+    # ── Rich Demo parser for positional + utility data ──
+    rich_kills_df: Optional[pd.DataFrame] = None
+    rich_smokes_df: Optional[pd.DataFrame] = None
+    rich_infernos_df: Optional[pd.DataFrame] = None
+    player_blind_df: Optional[pd.DataFrame] = None
+    try:
+        demo_rich = AwpyDemo(demo_path)
+        demo_rich.parse()
+        _rk = demo_rich.kills
+        if _rk is not None and len(_rk) > 0:
+            rich_kills_df = _rk.to_pandas() if hasattr(_rk, "to_pandas") else pd.DataFrame(_rk.to_dict())
+        _rs = demo_rich.smokes
+        if _rs is not None and len(_rs) > 0:
+            rich_smokes_df = _rs.to_pandas() if hasattr(_rs, "to_pandas") else pd.DataFrame(_rs.to_dict())
+        _ri = demo_rich.infernos
+        if _ri is not None and len(_ri) > 0:
+            rich_infernos_df = _ri.to_pandas() if hasattr(_ri, "to_pandas") else pd.DataFrame(_ri.to_dict())
+        # Parse player_blind events
+        _blind_evts = demo_rich.parse_events(["player_blind"])
+        if "player_blind" in _blind_evts:
+            _pb = _blind_evts["player_blind"]
+            if _pb is not None and len(_pb) > 0:
+                player_blind_df = _pb.to_pandas() if hasattr(_pb, "to_pandas") else pd.DataFrame(_pb.to_dict())
+    except Exception as e:
+        print(f"WARNING: Rich demo parse failed (non-fatal): {e}")
+
+    # Build kill context lookup: (round_num, victim_steamid) → tactical data
+    kill_context: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    if rich_kills_df is not None and not rich_kills_df.empty:
+        for _, row in rich_kills_df.iterrows():
+            rn = row.get("round_num")
+            v_id = str(row.get("victim_steamid", "")).strip()
+            if not rn or not v_id:
+                continue
+            kill_context[(int(rn), v_id)] = {
+                "attacker_place": str(row.get("attacker_place", "")) or "",
+                "victim_place": str(row.get("victim_place", "")) or "",
+                "attacker_blind": bool(row.get("attackerblind", False)),
+                "thrusmoke": bool(row.get("thrusmoke", False)),
+                "noscope": bool(row.get("noscope", False)),
+                "penetrated": bool(row.get("penetrated", False)),
+                "distance": float(row.get("distance", 0)) if row.get("distance") else None,
+                "weapon": str(row.get("weapon", "")) or "",
+                "headshot": bool(row.get("headshot", False)),
+                "attacker_name": str(row.get("attacker_name", "")) or "",
+                "victim_name": str(row.get("victim_name", "")) or "",
+                "attacker_steamid": str(row.get("attacker_steamid", "")).strip(),
+            }
+
+    # Build per-round utility usage from smokes/infernos DataFrames
+    # These have round_num + thrower_steamid
+    utility_per_round: Dict[int, Dict[str, List[str]]] = {}  # round → {player_id: [types]}
+    if rich_smokes_df is not None and not rich_smokes_df.empty:
+        for _, row in rich_smokes_df.iterrows():
+            rn = row.get("round_num")
+            thrower = str(row.get("thrower_steamid", "")).strip()
+            if not rn or not thrower:
+                continue
+            utility_per_round.setdefault(int(rn), {}).setdefault(thrower, []).append("smoke")
+    if rich_infernos_df is not None and not rich_infernos_df.empty:
+        for _, row in rich_infernos_df.iterrows():
+            rn = row.get("round_num")
+            thrower = str(row.get("thrower_steamid", "")).strip()
+            if not rn or not thrower:
+                continue
+            utility_per_round.setdefault(int(rn), {}).setdefault(thrower, []).append("molotov")
+
+    # Build per-round flash blind data: round → {thrower_id: [{blinded_player, duration}]}
+    # (assigned to rounds later after rounds_df is parsed, since player_blind lacks round_num)
+    flash_blind_data: Dict[int, List[Dict[str, Any]]] = {}
+
     def find_col(df, candidates):
         for name in candidates:
             if name in df.columns:
@@ -673,6 +745,30 @@ def parse_stats(
         rounds_df = pd.DataFrame()
     if purchases_df is None:
         purchases_df = pd.DataFrame()
+
+    # ── Assign round numbers to flash blind events using round end ticks ──
+    if player_blind_df is not None and not player_blind_df.empty and not rounds_df.empty:
+        _re_tick_col = None
+        for _c in ["tick", "tickNum", "tick_num", "time", "timeMs"]:
+            if _c in rounds_df.columns:
+                _re_tick_col = _c
+                break
+        if _re_tick_col and "tick" in player_blind_df.columns:
+            _round_ends = pd.to_numeric(rounds_df[_re_tick_col], errors="coerce").dropna().sort_values().tolist()
+            for _, _brow in player_blind_df.iterrows():
+                _btick = float(_brow.get("tick", 0))
+                _rn = len(_round_ends)  # default to last round
+                for _ri, _re in enumerate(_round_ends):
+                    if _btick <= _re:
+                        _rn = _ri + 1
+                        break
+                flash_blind_data.setdefault(_rn, []).append({
+                    "thrower": str(_brow.get("attacker_steamid", "")).strip(),
+                    "thrower_name": str(_brow.get("attacker_name", "")),
+                    "blinded": str(_brow.get("user_steamid", "")).strip(),
+                    "blinded_name": str(_brow.get("user_name", "")),
+                    "duration": round(float(_brow.get("blind_duration", 0)), 1),
+                })
 
     data = parser.parse() if hasattr(parser, "parse") else {}
     rounds = data.get("gameRounds", []) or []
@@ -1103,13 +1199,26 @@ def parse_stats(
                     ct_kills += 1
                 elif attacker_side == "T":
                     t_kills += 1
-                # Store kill details
+                # Store kill details with positional context from rich parser
                 victim_name = extract_player_name(kill, "victim") or players_by_id.get(normalize_id(kill.get("victimSteamID")), "unknown")
-                user_kill_details.setdefault(round_num, []).append({
+                v_id_str = normalize_id(kill.get("victimSteamID")) or ""
+                ctx = kill_context.get((round_num, v_id_str), {})
+                kill_detail: Dict[str, Any] = {
                     "victim": victim_name,
                     "weapon": str(weapon) if weapon else "unknown",
                     "headshot": is_hs,
-                })
+                }
+                if ctx.get("attacker_place"):
+                    kill_detail["attacker_position"] = ctx["attacker_place"]
+                if ctx.get("victim_place"):
+                    kill_detail["victim_position"] = ctx["victim_place"]
+                if ctx.get("thrusmoke"):
+                    kill_detail["thrusmoke"] = True
+                if ctx.get("attacker_blind"):
+                    kill_detail["attacker_was_blind"] = True
+                if ctx.get("distance"):
+                    kill_detail["distance"] = round(ctx["distance"], 1)
+                user_kill_details.setdefault(round_num, []).append(kill_detail)
             if victim and victim == target_steam_id:
                 user_died_this_round = True
                 victim_side = extract_side(kill, "victim")
@@ -1117,13 +1226,25 @@ def parse_stats(
                     ct_deaths += 1
                 elif victim_side == "T":
                     t_deaths += 1
-                # Store death details: weapon that killed the player, who killed them
+                # Store death details with positional context from rich parser
                 attacker_name = extract_player_name(kill, "attacker") or players_by_id.get(normalize_id(kill.get("attackerSteamID")), "unknown")
-                user_death_details[round_num] = {
+                ctx = kill_context.get((round_num, target_steam_id), {})
+                death_detail: Dict[str, Any] = {
                     "weapon": str(weapon) if weapon else "unknown",
                     "attacker": attacker_name,
                     "headshot": is_hs,
                 }
+                if ctx.get("attacker_place"):
+                    death_detail["attacker_position"] = ctx["attacker_place"]
+                if ctx.get("victim_place"):
+                    death_detail["victim_position"] = ctx["victim_place"]
+                if ctx.get("thrusmoke"):
+                    death_detail["thrusmoke"] = True
+                if ctx.get("attacker_blind"):
+                    death_detail["attacker_was_blind"] = True
+                if ctx.get("distance"):
+                    death_detail["distance"] = round(ctx["distance"], 1)
+                user_death_details[round_num] = death_detail
 
         if user_kills_this_round > 0:
             user_round_kills[round_num] = user_kills_this_round
@@ -1225,19 +1346,45 @@ def parse_stats(
 
                 if a_id == target_steam_id:
                     user_round_kills[rn] = user_round_kills.get(rn, 0) + 1
-                    user_kill_details.setdefault(rn, []).append({
+                    # Enrich with positional context from rich parser
+                    ctx = kill_context.get((rn, v_id), {})
+                    kill_detail: Dict[str, Any] = {
                         "victim": v_name,
                         "weapon": wpn,
                         "headshot": is_hs,
-                    })
+                    }
+                    if ctx.get("attacker_place"):
+                        kill_detail["attacker_position"] = ctx["attacker_place"]
+                    if ctx.get("victim_place"):
+                        kill_detail["victim_position"] = ctx["victim_place"]
+                    if ctx.get("thrusmoke"):
+                        kill_detail["thrusmoke"] = True
+                    if ctx.get("attacker_blind"):
+                        kill_detail["attacker_was_blind"] = True
+                    if ctx.get("distance"):
+                        kill_detail["distance"] = round(ctx["distance"], 1)
+                    user_kill_details.setdefault(rn, []).append(kill_detail)
                 if v_id == target_steam_id:
                     if rn not in user_round_deaths:
                         user_round_deaths.append(rn)
-                    user_death_details[rn] = {
+                    # Enrich with positional context from rich parser
+                    ctx = kill_context.get((rn, v_id), {})
+                    death_detail: Dict[str, Any] = {
                         "weapon": wpn,
                         "attacker": a_name,
                         "headshot": is_hs,
                     }
+                    if ctx.get("attacker_place"):
+                        death_detail["attacker_position"] = ctx["attacker_place"]
+                    if ctx.get("victim_place"):
+                        death_detail["victim_position"] = ctx["victim_place"]
+                    if ctx.get("thrusmoke"):
+                        death_detail["thrusmoke"] = True
+                    if ctx.get("attacker_blind"):
+                        death_detail["attacker_was_blind"] = True
+                    if ctx.get("distance"):
+                        death_detail["distance"] = round(ctx["distance"], 1)
+                    user_death_details[rn] = death_detail
     elif debug_demo and not rounds:
         print(
             "DEBUG: opening duel fallback skipped: "
@@ -1766,6 +1913,9 @@ def parse_stats(
         "user_round_deaths": user_round_deaths,
         "user_death_details": user_death_details,
         "user_kill_details": user_kill_details,
+        "utility_per_round": utility_per_round,
+        "flash_blind_data": flash_blind_data,
+        "target_steam_id": target_steam_id,
     }
 
 
@@ -1814,6 +1964,9 @@ def get_ai_coaching_tip(
     user_round_deaths = stats.get("user_round_deaths") or []
     user_death_details = stats.get("user_death_details") or {}
     user_kill_details = stats.get("user_kill_details") or {}
+    utility_per_round = stats.get("utility_per_round") or {}
+    flash_blind_data = stats.get("flash_blind_data") or {}
+    target_steam_id_for_tip = str(stats.get("target_steam_id") or "").strip()
 
     if team_size:
         opening_advantage = f"{team_size}v{team_size - 1}"
@@ -1897,17 +2050,18 @@ def get_ai_coaching_tip(
         if t_kills is not None and t_deaths is not None:
             stats_lines.append(f"T side: {t_kills}K/{t_deaths}D (K/D: {t_kd})")
 
-    # ── Round-by-round breakdown with full details ──
+    # ── Round-by-round breakdown with full tactical details ──
     if user_round_kills or user_round_deaths:
         stats_lines.append("")
-        stats_lines.append("-- Per-Round Kill/Death Log --")
-        all_round_nums = sorted(
-            set(user_round_kills.keys()) | set(user_round_deaths)
+        stats_lines.append("-- Per-Round Kill/Death Log (with positions) --")
+        total_rounds_count = max(
+            max(user_round_kills.keys()) if user_round_kills else 0,
+            max(user_round_deaths) if user_round_deaths else 0,
         )
-        for rn in all_round_nums:
-            k = user_round_kills.get(rn, 0)
+        for rn in range(1, total_rounds_count + 1):
             parts = [f"Round {rn}:"]
-            # Kill details
+
+            # Kill details with positions
             kill_info = user_kill_details.get(rn, [])
             if kill_info:
                 kill_strs = []
@@ -1915,19 +2069,79 @@ def get_ai_coaching_tip(
                     ks = f"killed {ki['victim']} with {ki['weapon']}"
                     if ki.get('headshot'):
                         ks += " (HS)"
+                    # Add positional context
+                    pos_parts = []
+                    if ki.get('attacker_position'):
+                        pos_parts.append(f"from {ki['attacker_position']}")
+                    if ki.get('victim_position'):
+                        pos_parts.append(f"victim at {ki['victim_position']}")
+                    if ki.get('thrusmoke'):
+                        pos_parts.append("through smoke")
+                    if ki.get('attacker_was_blind'):
+                        pos_parts.append("while blind")
+                    if ki.get('distance'):
+                        pos_parts.append(f"distance {ki['distance']}u")
+                    if pos_parts:
+                        ks += f" [{', '.join(pos_parts)}]"
                     kill_strs.append(ks)
-                parts.append(", ".join(kill_strs))
+                parts.append("; ".join(kill_strs))
             else:
                 parts.append("0 kills")
-            # Death details
+
+            # Death details with positions
             death_info = user_death_details.get(rn)
             if death_info:
                 dd = f"killed by {death_info['attacker']} with {death_info['weapon']}"
                 if death_info.get('headshot'):
                     dd += " (HS)"
+                pos_parts = []
+                if death_info.get('victim_position'):
+                    pos_parts.append(f"you were at {death_info['victim_position']}")
+                if death_info.get('attacker_position'):
+                    pos_parts.append(f"enemy at {death_info['attacker_position']}")
+                if death_info.get('thrusmoke'):
+                    pos_parts.append("through smoke")
+                if death_info.get('attacker_was_blind'):
+                    pos_parts.append("enemy was blind")
+                if death_info.get('distance'):
+                    pos_parts.append(f"distance {death_info['distance']}u")
+                if pos_parts:
+                    dd += f" [{', '.join(pos_parts)}]"
                 parts.append(dd)
             else:
-                parts.append("survived")
+                if rn in (set(user_round_kills.keys()) | set(user_round_deaths)):
+                    parts.append("survived")
+                else:
+                    parts.append("survived, 0 kills")
+
+            # Utility usage this round
+            user_util = utility_per_round.get(rn, {}).get(target_steam_id_for_tip, [])
+            if user_util:
+                from collections import Counter
+                util_counts = Counter(user_util)
+                util_str = ", ".join(f"{c}x {t}" for t, c in util_counts.items())
+                parts.append(f"utility: {util_str}")
+
+            # Flash effectiveness this round
+            round_blinds = flash_blind_data.get(rn, [])
+            user_flashes_thrown = [b for b in round_blinds if b.get("thrower") == target_steam_id_for_tip]
+            if user_flashes_thrown:
+                enemies_blinded = [b for b in user_flashes_thrown if b.get("blinded") != target_steam_id_for_tip]
+                self_blinded = [b for b in user_flashes_thrown if b.get("blinded") == target_steam_id_for_tip]
+                if enemies_blinded:
+                    names = set(b.get("blinded_name", "?") for b in enemies_blinded)
+                    parts.append(f"flash blinded enemies: {', '.join(names)}")
+                if self_blinded:
+                    parts.append("self-flashed!")
+            # Was the user blinded by enemy flash before death?
+            user_got_flashed = [b for b in round_blinds
+                                if b.get("blinded") == target_steam_id_for_tip
+                                and b.get("thrower") != target_steam_id_for_tip
+                                and b.get("duration", 0) > 0.5]
+            if user_got_flashed and rn in user_round_deaths:
+                flash_dur = max(b.get("duration", 0) for b in user_got_flashed)
+                parts.append(f"was flashed by enemy for {flash_dur}s before death")
+
             stats_lines.append(" | ".join(parts))
 
     # ── Round highlights (multi-kills, clutches) ──
@@ -2072,34 +2286,46 @@ def get_ai_coaching_tip(
             "(K/D, ADR, HS%, scoreboard, round timeline, death analysis). "
             "Do NOT repeat or recite any stats. Do NOT create a stats summary. "
             "Your ONLY job is to provide COACHING — analyze what went wrong and how to fix it.\n\n"
+            "The Per-Round Kill/Death Log contains EXACT positions (map callouts like 'Mid', 'BombsiteA', 'Apartments', etc.), "
+            "the exact weapon used, whether it was through smoke, whether you were flashed, and utility usage. "
+            "USE THIS DATA to give position-specific coaching.\n\n"
             "Structure the response like this:\n\n"
             "1. MATCH STORY — A short narrative of how the match unfolded. "
             "Group rounds into phases (e.g., 'Rounds 1-4: strong start' or 'Rounds 8-12: momentum lost'). "
             "For each phase, explain what the player did right or wrong and how the score shifted.\n\n"
             "2. ROUND-BY-ROUND MISTAKES — Go through EVERY round where the player died. "
-            "For each death round, explain:\n"
-            "  - When they died (early = over-peeking, late = caught in rotation)\n"
-            "  - What weapon killed them and what that says about their positioning\n"
-            "  - What they should have done differently\n"
-            "  - If they had 0 kills that round, call it out as a zero-impact round\n\n"
-            "3. TIMING AND POSITIONING — Based on the avg death time and distance:\n"
-            "  - If dying early: too aggressive, over-peeking, bad utility usage\n"
-            "  - If dying late: bad rotation timing, caught off guard in retakes\n"
-            "  - What the kill weapon reveals about their positioning mistakes\n\n"
+            "For each death round, use the EXACT position data to explain:\n"
+            "  - WHERE they were on the map when they died (use the callout from the data)\n"
+            "  - WHERE the enemy was when they killed the player (use the enemy position callout)\n"
+            "  - What weapon killed them and what that DISTANCE + POSITION combination reveals\n"
+            "    (e.g., 'You were at TopofMid and got AWP'd from Arch at 20u — you peeked without flash')\n"
+            "  - If they were flashed before death: 'You got flashed for Xs, don't peek without clearing flash'\n"
+            "  - If they used no utility that round: call out that they dry-peeked\n"
+            "  - If they threw a flash but self-flashed: 'bad flash — turn away or use a pop flash'\n"
+            "  - Specific advice for that POSITION on that MAP (e.g., 'on Inferno, don't peek TopofMid without smoking Arch first')\n"
+            "  - What they should have done differently at that exact position\n"
+            "  - If 0 kills that round, call it out as a zero-impact round\n\n"
+            "3. POSITIONING PATTERNS — Analyze WHERE the player keeps dying:\n"
+            "  - Are they dying in the same position repeatedly? (e.g., 'You died at Mid 3 times')\n"
+            "  - Are they in positions that are too exposed for their weapon?\n"
+            "  - Were they using utility (smokes/flashes/molotovs) before peeking?\n"
+            "  - What angles should they hold instead?\n"
+            "  - If they got kills, what positions worked well for them?\n\n"
             "4. COMPARED TO TEAMMATES — Without reciting numbers:\n"
             "  - Was the player carrying or being carried?\n"
             "  - Who on the team was more impactful and why?\n"
             "  - Did the player support their team with trades and utility?\n\n"
             "5. COACHING PLAN — 4-6 specific, actionable improvements:\n"
-            "  - Reference exact rounds from THIS match as examples\n"
-            "  - Give concrete advice for the specific MAP played\n"
-            "  - Suggest specific positions, angles, or timing changes\n"
-            "  - Address the weapon they keep dying to with counter-play\n"
-            "  - If they had low opening duel wins, give peeking advice\n"
-            "  - If utility damage was low, suggest specific util lineups for the map\n\n"
-            "Be honest, direct, and constructive. Talk like a real coach in a post-match VOD review.\n"
-            "Reference specific round numbers throughout — do NOT speak in generalities.\n"
-            "The message can be long. Cover every mistake."
+            "  - Reference exact rounds AND positions from THIS match\n"
+            "  - Give concrete advice for MAP-SPECIFIC positions (name the spots)\n"
+            "  - Tell them exactly which utility to throw before peeking specific angles\n"
+            "  - 'In Round 5, you dry-peeked TopofMid — next time throw a flash off the wall at X first'\n"
+            "  - If dying to AWP at long range, suggest smoking or flashing the angle\n"
+            "  - If dying close-range, suggest holding tighter angles or using molotovs\n"
+            "  - If self-flashing, explain proper pop-flash technique for that map position\n\n"
+            "Be honest, direct, and constructive. Talk like a real coach doing a VOD review.\n"
+            "Reference specific round numbers AND map positions throughout — do NOT speak in generalities.\n"
+            "Use the EXACT position names from the data (like 'TopofMid', 'BombsiteA', 'Apartments')."
         )
 
     language_prompt = ""
@@ -2133,13 +2359,15 @@ def get_ai_coaching_tip(
         "- Focus ONLY on: what went wrong, why, and how to fix it.\n"
         "- This is a Steam chat message — no markdown (no ### or **bold**).\n"
         "- Use emojis for section markers, dashes - for bullets, line breaks for structure.\n"
-        "- Reference SPECIFIC ROUND NUMBERS for every point you make.\n"
-        "- Analyze every death round: explain *why* the player died and what to do differently.\n"
+        "- Reference SPECIFIC ROUND NUMBERS AND MAP POSITIONS for every point you make.\n"
+        "- The data includes exact positions (callouts like 'TopofMid', 'BombsiteA', 'Arch', etc.), "
+        "weapons, distances, flash/smoke context, and utility usage for EVERY kill and death.\n"
+        "- USE these positions to give specific coaching like 'you were at X and got killed from Y — "
+        "next time smoke Y before peeking' or 'you dry-peeked TopofMid without flashing'.\n"
         "- Do NOT fabricate or invent ANY data. ONLY reference facts explicitly listed below.\n"
-        "- For each death round, ONLY mention the weapon and attacker shown in the Per-Round Kill/Death Log.\n"
-        "- If weapon or attacker info is missing for a round, say 'details unavailable' — do NOT guess.\n"
-        "- Do NOT include any URLs or links.\n"
-        "- The message can be long. Cover every mistake and improvement.\n\n"
+        "- For each death round, ONLY mention the weapon, attacker, and positions shown in the Per-Round Kill/Death Log.\n"
+        "- If position or weapon info is missing for a round, say 'details unavailable' — do NOT guess.\n"
+        "- Do NOT include any URLs or links.\n\n"
         + style_prompt
         + "\n\n"
         + language_prompt
