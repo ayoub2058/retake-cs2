@@ -1069,6 +1069,10 @@ def parse_stats(
     clutch_rounds: List[Dict[str, Any]] = []
     user_round_kills: Dict[int, int] = {}  # round_num → kills by user
     user_round_deaths: List[int] = []      # rounds where user died
+    # Detailed per-round death info: round_num → {weapon, attacker_name, headshot}
+    user_death_details: Dict[int, Dict[str, Any]] = {}
+    # Detailed per-round kill info: round_num → [{victim_name, weapon, headshot}]
+    user_kill_details: Dict[int, List[Dict[str, Any]]] = {}
 
     for rnd_idx, round_data in enumerate(rounds):
         round_num = rnd_idx + 1
@@ -1088,6 +1092,7 @@ def parse_stats(
             attacker = normalize_id(kill.get("attackerSteamID"))
             victim = normalize_id(kill.get("victimSteamID"))
             weapon = kill.get("weapon") or kill.get("weaponName") or kill.get("weapon_name")
+            is_hs = bool(kill.get("headshot") or kill.get("isHeadshot") or kill.get("headshot_bool"))
             if attacker and attacker == target_steam_id and weapon:
                 weapon_key = str(weapon)
                 weapon_counts[weapon_key] = weapon_counts.get(weapon_key, 0) + 1
@@ -1098,6 +1103,13 @@ def parse_stats(
                     ct_kills += 1
                 elif attacker_side == "T":
                     t_kills += 1
+                # Store kill details
+                victim_name = extract_player_name(kill, "victim") or players_by_id.get(normalize_id(kill.get("victimSteamID")), "unknown")
+                user_kill_details.setdefault(round_num, []).append({
+                    "victim": victim_name,
+                    "weapon": str(weapon) if weapon else "unknown",
+                    "headshot": is_hs,
+                })
             if victim and victim == target_steam_id:
                 user_died_this_round = True
                 victim_side = extract_side(kill, "victim")
@@ -1105,6 +1117,13 @@ def parse_stats(
                     ct_deaths += 1
                 elif victim_side == "T":
                     t_deaths += 1
+                # Store death details: weapon that killed the player, who killed them
+                attacker_name = extract_player_name(kill, "attacker") or players_by_id.get(normalize_id(kill.get("attackerSteamID")), "unknown")
+                user_death_details[round_num] = {
+                    "weapon": str(weapon) if weapon else "unknown",
+                    "attacker": attacker_name,
+                    "headshot": is_hs,
+                }
 
         if user_kills_this_round > 0:
             user_round_kills[round_num] = user_kills_this_round
@@ -1189,6 +1208,36 @@ def parse_stats(
             sample_rows = first_kills[[attacker_col, victim_col]].head(5)
             print("DEBUG: first_kills sample:")
             print(sample_rows.to_string(index=True))
+
+            # Build per-round death/kill details from deaths_df (fallback when rounds list is empty)
+            attacker_name_col = find_col(deaths_df, ["attacker_name", "attackerName", "attacker_player_name"])
+            victim_name_col = find_col(deaths_df, ["user_name", "victim_name", "victimName", "userid_name"])
+            for _, drow in deaths_df_local.iterrows():
+                rn = int(drow[round_key]) if pd.notna(drow.get(round_key)) else None
+                if not rn:
+                    continue
+                a_id = normalize_id(drow.get(attacker_col))
+                v_id = normalize_id(drow.get(victim_col))
+                wpn = str(drow.get(weapon_col, "unknown")) if weapon_col else "unknown"
+                is_hs = bool(drow.get(headshot_col)) if headshot_col else False
+                a_name = str(drow.get(attacker_name_col, "unknown")) if attacker_name_col else players_by_id.get(a_id, "unknown")
+                v_name = str(drow.get(victim_name_col, "unknown")) if victim_name_col else players_by_id.get(v_id, "unknown")
+
+                if a_id == target_steam_id:
+                    user_round_kills[rn] = user_round_kills.get(rn, 0) + 1
+                    user_kill_details.setdefault(rn, []).append({
+                        "victim": v_name,
+                        "weapon": wpn,
+                        "headshot": is_hs,
+                    })
+                if v_id == target_steam_id:
+                    if rn not in user_round_deaths:
+                        user_round_deaths.append(rn)
+                    user_death_details[rn] = {
+                        "weapon": wpn,
+                        "attacker": a_name,
+                        "headshot": is_hs,
+                    }
     elif debug_demo and not rounds:
         print(
             "DEBUG: opening duel fallback skipped: "
@@ -1715,6 +1764,8 @@ def parse_stats(
         "clutch_rounds": clutch_rounds,
         "user_round_kills": user_round_kills,
         "user_round_deaths": user_round_deaths,
+        "user_death_details": user_death_details,
+        "user_kill_details": user_kill_details,
     }
 
 
@@ -1761,6 +1812,8 @@ def get_ai_coaching_tip(
     clutch_rounds = stats.get("clutch_rounds") or []
     user_round_kills = stats.get("user_round_kills") or {}
     user_round_deaths = stats.get("user_round_deaths") or []
+    user_death_details = stats.get("user_death_details") or {}
+    user_kill_details = stats.get("user_kill_details") or {}
 
     if team_size:
         opening_advantage = f"{team_size}v{team_size - 1}"
@@ -1844,7 +1897,7 @@ def get_ai_coaching_tip(
         if t_kills is not None and t_deaths is not None:
             stats_lines.append(f"T side: {t_kills}K/{t_deaths}D (K/D: {t_kd})")
 
-    # ── Round-by-round breakdown ──
+    # ── Round-by-round breakdown with full details ──
     if user_round_kills or user_round_deaths:
         stats_lines.append("")
         stats_lines.append("-- Per-Round Kill/Death Log --")
@@ -1853,8 +1906,29 @@ def get_ai_coaching_tip(
         )
         for rn in all_round_nums:
             k = user_round_kills.get(rn, 0)
-            d = "died" if rn in user_round_deaths else "survived"
-            stats_lines.append(f"Round {rn}: {k} kill{'s' if k != 1 else ''}, {d}")
+            parts = [f"Round {rn}:"]
+            # Kill details
+            kill_info = user_kill_details.get(rn, [])
+            if kill_info:
+                kill_strs = []
+                for ki in kill_info:
+                    ks = f"killed {ki['victim']} with {ki['weapon']}"
+                    if ki.get('headshot'):
+                        ks += " (HS)"
+                    kill_strs.append(ks)
+                parts.append(", ".join(kill_strs))
+            else:
+                parts.append("0 kills")
+            # Death details
+            death_info = user_death_details.get(rn)
+            if death_info:
+                dd = f"killed by {death_info['attacker']} with {death_info['weapon']}"
+                if death_info.get('headshot'):
+                    dd += " (HS)"
+                parts.append(dd)
+            else:
+                parts.append("survived")
+            stats_lines.append(" | ".join(parts))
 
     # ── Round highlights (multi-kills, clutches) ──
     if multi_kill_rounds or clutch_rounds:
@@ -1885,12 +1959,24 @@ def get_ai_coaching_tip(
             stats_lines.append(f"Survived rounds: {', '.join(str(r) for r in rounds_survived)}")
     if first_death_round is not None:
         stats_lines.append(f"First death occurred in round: {first_death_round}")
-    if common_death_round is not None:
-        stats_lines.append(f"Most common death round: {common_death_round}")
-    if top_death_rounds:
-        rounds_list = ", ".join(str(v) for v in top_death_rounds)
-        stats_lines.append(f"Rounds with most deaths: {rounds_list}")
-    if common_death_weapon:
+    # Weapon-by-weapon death breakdown
+    if user_death_details:
+        weapon_death_counts: Dict[str, int] = {}
+        attacker_death_counts: Dict[str, int] = {}
+        for dd in user_death_details.values():
+            w = dd.get("weapon", "unknown")
+            a = dd.get("attacker", "unknown")
+            weapon_death_counts[w] = weapon_death_counts.get(w, 0) + 1
+            attacker_death_counts[a] = attacker_death_counts.get(a, 0) + 1
+        weapon_breakdown = ", ".join(
+            f"{w}: {c}x" for w, c in sorted(weapon_death_counts.items(), key=lambda x: -x[1])
+        )
+        stats_lines.append(f"Weapons that killed you: {weapon_breakdown}")
+        attacker_breakdown = ", ".join(
+            f"{a}: {c}x" for a, c in sorted(attacker_death_counts.items(), key=lambda x: -x[1])
+        )
+        stats_lines.append(f"Players who killed you: {attacker_breakdown}")
+    elif common_death_weapon:
         stats_lines.append(f"Most killed by weapon: {common_death_weapon}")
     if death_headshot_rate is not None:
         stats_lines.append(f"Death HS rate (killed by HS): {death_headshot_rate}%")
@@ -2049,7 +2135,9 @@ def get_ai_coaching_tip(
         "- Use emojis for section markers, dashes - for bullets, line breaks for structure.\n"
         "- Reference SPECIFIC ROUND NUMBERS for every point you make.\n"
         "- Analyze every death round: explain *why* the player died and what to do differently.\n"
-        "- Do NOT fabricate data. Only reference what is provided below.\n"
+        "- Do NOT fabricate or invent ANY data. ONLY reference facts explicitly listed below.\n"
+        "- For each death round, ONLY mention the weapon and attacker shown in the Per-Round Kill/Death Log.\n"
+        "- If weapon or attacker info is missing for a round, say 'details unavailable' — do NOT guess.\n"
         "- Do NOT include any URLs or links.\n"
         "- The message can be long. Cover every mistake and improvement.\n\n"
         + style_prompt
