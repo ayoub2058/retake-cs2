@@ -345,18 +345,106 @@ const downloadReplay = async (url, outputFile) => {
   }
 };
 
+/**
+ * Check if we can message a user by their SteamID64.
+ * Handles potential SteamID format mismatches between DB (SteamID64) and
+ * client.myFriends keys (which may be SteamID64 OR Steam3 format).
+ */
 const canMessageUser = (steamId) => {
   if (!steamId) {
     return false;
   }
-  const relationship =
-    client.myFriends?.[steamId] ?? client.friends?.[steamId];
+
+  const friends = client.myFriends || client.friends || {};
+  const sid64 = String(steamId);
+
+  // 1) Direct lookup (works when keys are SteamID64)
+  let relationship = friends[sid64];
+
+  // 2) Try Steam3 format [U:1:accountId] (some steam-user versions use this)
+  if (relationship === undefined || relationship === null) {
+    if (/^\d{17}$/.test(sid64)) {
+      try {
+        const accountId = BigInt(sid64) - 76561197960265728n;
+        const steam3 = `[U:1:${accountId}]`;
+        relationship = friends[steam3];
+      } catch (_) { /* invalid id */ }
+    }
+  }
+
+  // 3) Brute-force scan: iterate keys and compare SteamID64 values
+  if (relationship === undefined || relationship === null) {
+    for (const key of Object.keys(friends)) {
+      try {
+        // If key is a SteamID object with getSteamID64, compare that way
+        if (typeof key === "string" && key.startsWith("[")) {
+          // Parse Steam3 format [U:1:accountId] → SteamID64
+          const m = key.match(/^\[U:1:(\d+)\]$/);
+          if (m) {
+            const reconstructed = String(BigInt(m[1]) + 76561197960265728n);
+            if (reconstructed === sid64) {
+              relationship = friends[key];
+              break;
+            }
+          }
+        } else if (key === sid64) {
+          relationship = friends[key];
+          break;
+        }
+      } catch (_) { /* skip malformed keys */ }
+    }
+  }
+
+  if (relationship === undefined || relationship === null) {
+    return false;
+  }
+
   return (
-    relationship &&
     relationship !== SteamUser.EFriendRelationship.None &&
     relationship !== SteamUser.EFriendRelationship.Blocked &&
     relationship !== SteamUser.EFriendRelationship.Ignored
   );
+};
+
+/**
+ * Send a Steam chat message with automatic fallback:
+ *   1) client.chat.sendFriendMessage   (new chat proto)
+ *   2) client.chatMessage              (legacy EMsg)
+ * Throws only when BOTH methods fail.
+ */
+const sendSteamMessage = async (steamId, message) => {
+  const preview = message.length > 80 ? message.slice(0, 80) + "…" : message;
+  log("Tip", `sendSteamMessage → ${steamId} (${message.length} chars): "${preview}"`);
+
+  // Normalise to SteamID object if the library provides it (better compatibility)
+  let targetId = steamId;
+  try {
+    if (SteamUser.SteamID) {
+      targetId = new SteamUser.SteamID(String(steamId));
+    }
+  } catch (_) { /* keep original string */ }
+
+  // Try new chat API first
+  if (typeof client.chat?.sendFriendMessage === "function") {
+    try {
+      const result = await client.chat.sendFriendMessage(targetId, message);
+      log("Tip", `chat.sendFriendMessage OK for ${steamId} (result: ${JSON.stringify(result)?.slice(0, 120)})`);
+      return;
+    } catch (err) {
+      log("Tip", `chat.sendFriendMessage FAILED for ${steamId}: ${err.message} — trying legacy API`);
+    }
+  } else {
+    log("Tip", `client.chat.sendFriendMessage not available (chat=${typeof client.chat})`);
+  }
+
+  // Fallback: legacy chatMessage (fire-and-forget)
+  if (typeof client.chatMessage === "function") {
+    log("Tip", `Using legacy client.chatMessage for ${steamId}`);
+    client.chatMessage(targetId, message);
+    return;
+  }
+
+  throw new Error("No usable Steam chat API available");
 };
 
 /**
@@ -438,23 +526,52 @@ const revertTipClaim = async (matchId) => {
 };
 
 const sendPendingMessages = async () => {
-  if (isSendingTips || !steamReady) {
+  if (isSendingTips) {
+    return;
+  }
+  if (!steamReady) {
+    log("Tip", "Steam not ready — skipping tip cycle.");
+    return;
+  }
+
+  // Don't attempt to send tips until the friends list has loaded
+  const friends = client.myFriends || client.friends || {};
+  const friendCount = Object.keys(friends).length;
+  if (friendCount === 0) {
+    log("Tip", "Friends list not loaded yet (0 entries) — skipping tip cycle.");
     return;
   }
 
   isSendingTips = true;
+  log("Tip", `Starting tip cycle (${friendCount} friends loaded).`);
+  const skippedIds = new Set();  // track IDs we can't deliver this cycle
   try {
     // Process tips one-at-a-time with atomic claim
     let sent = 0;
+    let failures = 0;
+    const MAX_FAILURES_PER_CYCLE = 3;  // stop cycling after N consecutive failures
     while (true) {
       const row = await claimNextTip();
       if (!row) break;
 
+      // ── Guard: already tried this ID this cycle (prevents infinite loop) ──
+      if (skippedIds.has(row.id)) {
+        await revertTipClaim(row.id);
+        break;  // we've looped back → stop
+      }
+
       const steamId = row.user_steam_id;
-      log("Tip", `Claimed match ${row.id} for ${steamId} (friend status: ${client.myFriends?.[steamId]})`);
+      log("Tip", `Claimed match ${row.id} for steam ${steamId} (friend rel: ${client.myFriends?.[steamId]})`);
 
       if (!canMessageUser(steamId)) {
-        log("Tip", `Cannot message ${steamId}; not a friend. Will retry later.`);
+        // Log available friends for debugging (first time only)
+        if (skippedIds.size === 0) {
+          const fkeys = Object.keys(client.myFriends || client.friends || {}).slice(0, 5);
+          log("Tip", `Cannot message ${steamId} — not on friends list (sample keys: ${fkeys.join(", ") || "<empty>"}).`);
+        } else {
+          log("Tip", `Cannot message ${steamId} — not on friends list. Will retry next cycle.`);
+        }
+        skippedIds.add(row.id);
         await revertTipClaim(row.id);
         continue;
       }
@@ -472,7 +589,7 @@ const sendPendingMessages = async () => {
 
         // 1) Send stats card image URL alone so Steam auto-embeds it as an image
         if (row.tip_image_url) {
-          await client.chat.sendFriendMessage(steamId, row.tip_image_url);
+          await sendSteamMessage(steamId, row.tip_image_url);
           await sleep(2000);
         }
 
@@ -482,7 +599,7 @@ const sendPendingMessages = async () => {
         if (tipText.length > 0) {
           log("Tip", `Coach tip for match ${row.id}: ${tipText.length} chars`);
           if (tipText.length <= STEAM_MAX) {
-            await client.chat.sendFriendMessage(steamId, tipText);
+            await sendSteamMessage(steamId, tipText);
             await sleep(2000);
           } else {
             // Split on double-newlines (section breaks) to keep sections intact
@@ -490,14 +607,14 @@ const sendPendingMessages = async () => {
             let chunk = "";
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
-                await client.chat.sendFriendMessage(steamId, chunk.trim());
+                await sendSteamMessage(steamId, chunk.trim());
                 await sleep(2000);
                 chunk = "";
               }
               chunk += (chunk ? "\n\n" : "") + section;
             }
             if (chunk.trim()) {
-              await client.chat.sendFriendMessage(steamId, chunk.trim());
+              await sendSteamMessage(steamId, chunk.trim());
               await sleep(2000);
             }
           }
@@ -508,19 +625,28 @@ const sendPendingMessages = async () => {
         // 3) Send match stats link as the last message
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
-        await client.chat.sendFriendMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+        await sendSteamMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
 
         await markTipSent(row.id);
         sent++;
-        log("Tip", `Sent coach tip for match ${row.id} — ${tipText.length} chars (${sent} this cycle).`);
+        failures = 0;  // reset consecutive-failure counter
+        log("Tip", `✓ Sent coach tip for match ${row.id} — ${tipText.length} chars (${sent} this cycle).`);
       } catch (error) {
-        console.warn(`Failed to send tip to ${steamId}:`, error);
-        // Revert so we retry next cycle
+        console.warn(`Failed to send tip to ${steamId}:`, error?.message || error);
+        skippedIds.add(row.id);
         await revertTipClaim(row.id);
+        failures++;
+        if (failures >= MAX_FAILURES_PER_CYCLE) {
+          log("Tip", `${failures} consecutive send failures — stopping this cycle.`);
+          break;
+        }
       }
 
       // Small delay between messages to avoid Steam rate-limiting
       await sleep(1500);
+    }
+    if (sent > 0) {
+      log("Tip", `Cycle done: ${sent} tip(s) delivered, ${skippedIds.size} skipped.`);
     }
   } finally {
     isSendingTips = false;
@@ -664,14 +790,15 @@ const startDownloadPolling = () => {
 };
 
 const startMessagePolling = () => {
-  if (messagePollerStarted || !friendsReady) {
+  if (messagePollerStarted) {
     return;
   }
   messagePollerStarted = true;
+  log("Tip", `Message polling started (every ${POLL_INTERVAL_MS / 1000}s). friendsReady=${friendsReady}`);
   setInterval(() => {
-    sendPendingMessages().catch((error) => console.error(error));
+    sendPendingMessages().catch((error) => console.error("[Tip] polling error:", error));
   }, POLL_INTERVAL_MS);
-  sendPendingMessages().catch((error) => console.error(error));
+  sendPendingMessages().catch((error) => console.error("[Tip] polling error:", error));
 };
 
 client.on("loggedOn", () => {
@@ -682,6 +809,9 @@ client.on("loggedOn", () => {
   lastConnectedAt = Date.now();
   client.setPersona(SteamUser.EPersonaState.Online);
   client.gamesPlayed(APP_ID_CS2);
+  // Start message polling — actual sending waits for friends list in sendPendingMessages()
+  startMessagePolling();
+  log("Steam", "Waiting for friends list before sending tips...");
 });
 
 client.on("friendRelationship", (steamId, relationship) => {
@@ -692,7 +822,15 @@ client.on("friendRelationship", (steamId, relationship) => {
 
 client.on("friendsList", () => {
   friendsReady = true;
+  const friends = client.myFriends || client.friends || {};
+  const keys = Object.keys(friends);
+  log("Steam", `Friends list loaded: ${keys.length} entries.`);
+  if (keys.length > 0) {
+    log("Steam", `  Sample key format: "${keys[0]}" (type: ${typeof keys[0]})`);
+  }
   startMessagePolling();
+  // Immediately try sending any pending tips now that friends are loaded
+  sendPendingMessages().catch((err) => console.error("[Tip] post-friendsList error:", err));
 });
 
 client.on("error", (error) => {
