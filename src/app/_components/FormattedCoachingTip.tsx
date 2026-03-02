@@ -149,9 +149,8 @@ function highlightBody(body: string) {
 }
 
 function RoundCard({ round, index }: { round: RoundEntry; index: number }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const bodyParts = useMemo(() => highlightBody(round.body), [round.body]);
-  const isLong = round.body.length > 200;
 
   return (
     <div className="rounded-xl border border-white/[0.06] bg-black/20 overflow-hidden transition-all">
