@@ -10,6 +10,15 @@ type MatchRow = {
   created_at: string | null;
   result?: "win" | "loss" | "tie" | null;
   score?: string | null;
+  status?: string | null;
+};
+
+const statusConfig: Record<string, { label: string; color: string; dot: string; animate?: boolean }> = {
+  pending: { label: "Queued", color: "text-white/50 bg-white/[0.06] border-white/10", dot: "bg-white/40" },
+  downloading: { label: "Downloading", color: "text-sky-300 bg-sky-500/10 border-sky-500/20", dot: "bg-sky-400", animate: true },
+  parsing: { label: "Analyzing", color: "text-amber-300 bg-amber-500/10 border-amber-500/20", dot: "bg-amber-400", animate: true },
+  done: { label: "Ready", color: "text-emerald-300 bg-emerald-500/10 border-emerald-500/20", dot: "bg-emerald-400" },
+  error: { label: "Error", color: "text-rose-300 bg-rose-500/10 border-rose-500/20", dot: "bg-rose-400" },
 };
 
 const formatDate = (value: string | null, locale: string, fallback: string) => {
@@ -55,6 +64,7 @@ export const MatchTable = ({ matches }: { matches: MatchRow[] }) => {
             <th className="px-6 py-4 font-medium">{t("date")}</th>
             <th className="px-6 py-4 font-medium">{t("map")}</th>
             <th className="px-6 py-4 font-medium text-center">Result</th>
+            <th className="px-6 py-4 font-medium text-center">{t("statusLabel")}</th>
             <th className="px-6 py-4 text-right font-medium">{t("action")}</th>
           </tr>
         </thead>
@@ -89,6 +99,18 @@ export const MatchTable = ({ matches }: { matches: MatchRow[] }) => {
                   ) : (
                     <span className="text-xs text-white/30">—</span>
                   )}
+                </td>
+                <td className="px-6 py-4 text-center">
+                  {(() => {
+                    const sc = match.status ? statusConfig[match.status] : null;
+                    if (!sc) return <span className="text-xs text-white/30">—</span>;
+                    return (
+                      <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${sc.color}`}>
+                        <span className={`inline-block h-1.5 w-1.5 rounded-full ${sc.dot} ${sc.animate ? "animate-pulse" : ""}`} />
+                        {sc.label}
+                      </span>
+                    );
+                  })()}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <Link

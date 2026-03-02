@@ -60,6 +60,16 @@ export default async function DashboardLayout({
               </svg>
               {t("playerStats")}
             </Link>
+            <Link
+              href="/dashboard/coaching"
+              className="group flex items-center gap-3 rounded-xl border border-transparent px-4 py-3 text-white/80 transition-all hover:border-white/10 hover:bg-white/[0.06] hover:text-white"
+            >
+              <svg className="h-4 w-4 text-white/40 transition group-hover:text-[#a78bfa]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+              </svg>
+              {t("aiCoaching")}
+            </Link>
           </nav>
 
           {/* Divider */}
@@ -72,7 +82,7 @@ export default async function DashboardLayout({
 
           {/* Version */}
           <p className="mt-4 text-center text-[9px] uppercase tracking-[0.3em] text-white/20">
-            v2.0
+            v2.1
           </p>
         </div>
       </aside>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Search } from "lucide-react";
 import { useI18n } from "@/app/_components/I18nProvider";
@@ -30,6 +30,7 @@ const getFaceitBadgeClass = (level: number) => {
 export function GlobalSearch({ placeholder }: GlobalSearchProps) {
   const router = useRouter();
   const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -38,6 +39,22 @@ export function GlobalSearch({ placeholder }: GlobalSearchProps) {
   const [isOpen, setIsOpen] = useState(false);
 
   const trimmedQuery = useMemo(() => query.trim(), [query]);
+
+  // Keyboard shortcut: Ctrl+K / Cmd+K to focus search
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+      if (e.key === "Escape" && document.activeElement === inputRef.current) {
+        inputRef.current?.blur();
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
 
   const runSearch = async (value: string) => {
     if (!value) {
@@ -118,16 +135,21 @@ export function GlobalSearch({ placeholder }: GlobalSearchProps) {
 
   return (
     <div className="relative w-full max-w-xl">
-      <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/50 px-4 py-3 text-sm text-white/80 shadow-[0_20px_40px_rgba(0,0,0,0.35)]">
+      <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/50 px-4 py-3 text-sm text-white/80 shadow-[0_20px_40px_rgba(0,0,0,0.35)] focus-within:border-[#67f5ff]/30 focus-within:ring-1 focus-within:ring-[#67f5ff]/20 transition-all">
         <Search className="h-4 w-4 text-white/50" />
         <input
+          ref={inputRef}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder ?? t("searchPlaceholder")}
           className="flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/40"
         />
-        {isLoading ? <Loader2 className="h-4 w-4 animate-spin text-white/60" /> : null}
+        {isLoading ? <Loader2 className="h-4 w-4 animate-spin text-white/60" /> : (
+          <kbd className="hidden sm:inline-flex items-center gap-0.5 rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium text-white/30">
+            <span className="text-[9px]">⌘</span>K
+          </kbd>
+        )}
       </div>
 
       {isOpen ? (
