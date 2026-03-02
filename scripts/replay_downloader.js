@@ -525,6 +525,32 @@ const revertTipClaim = async (matchId) => {
   );
 };
 
+/**
+ * Recovery: reset tip_sent for matches that got "stuck" — claimed (tip_sent=true)
+ * but never moved to 'notified' within STUCK_TIP_THRESHOLD_MS.
+ * This handles bot crashes, restarts, or unexpected errors that bypass revertTipClaim.
+ */
+const STUCK_TIP_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+const recoverStuckTips = async () => {
+  try {
+    const result = await pool.query(
+      `UPDATE public.matches_to_download
+       SET tip_sent = false
+       WHERE status IN ('processed', 'parsed')
+         AND tip_sent = true
+         AND coach_tip IS NOT NULL
+         AND created_at < NOW() - INTERVAL '5 minutes'
+       RETURNING id`
+    );
+    if (result.rowCount > 0) {
+      const ids = result.rows.map(r => r.id);
+      log("Tip", `Recovered ${result.rowCount} stuck tip(s): [${ids.join(", ")}] — reset tip_sent to false.`);
+    }
+  } catch (err) {
+    log("Tip", `recoverStuckTips error: ${err.message}`);
+  }
+};
+
 const sendPendingMessages = async () => {
   if (isSendingTips) {
     return;
@@ -533,6 +559,9 @@ const sendPendingMessages = async () => {
     log("Tip", "Steam not ready — skipping tip cycle.");
     return;
   }
+
+  // Recover any stuck tips before starting (handles bot crash / restart)
+  await recoverStuckTips();
 
   // Don't attempt to send tips until the friends list has loaded
   const friends = client.myFriends || client.friends || {};
@@ -544,37 +573,73 @@ const sendPendingMessages = async () => {
 
   isSendingTips = true;
   log("Tip", `Starting tip cycle (${friendCount} friends loaded).`);
+
+  // Quick diagnostic: how many tips are pending in DB?
+  try {
+    const pendingCheck = await pool.query(
+      `SELECT COUNT(*) as cnt FROM public.matches_to_download
+       WHERE status IN ('processed', 'parsed')
+         AND coach_tip IS NOT NULL
+         AND (tip_sent IS NULL OR tip_sent = false)`
+    );
+    log("Tip", `Pending tips in DB: ${pendingCheck.rows[0]?.cnt || 0}`);
+  } catch (_) { /* non-critical */ }
+
   const skippedIds = new Set();  // track IDs we can't deliver this cycle
+  let currentClaimedId = null;   // track currently claimed tip for safety revert
   try {
     // Process tips one-at-a-time with atomic claim
     let sent = 0;
     let failures = 0;
     const MAX_FAILURES_PER_CYCLE = 3;  // stop cycling after N consecutive failures
     while (true) {
+      currentClaimedId = null;
       const row = await claimNextTip();
-      if (!row) break;
+      if (!row) {
+        log("Tip", "No more pending tips to claim.");
+        break;
+      }
+      currentClaimedId = row.id;
 
       // ── Guard: already tried this ID this cycle (prevents infinite loop) ──
       if (skippedIds.has(row.id)) {
         await revertTipClaim(row.id);
+        currentClaimedId = null;
         break;  // we've looped back → stop
       }
 
       const steamId = row.user_steam_id;
-      log("Tip", `Claimed match ${row.id} for steam ${steamId} (friend rel: ${client.myFriends?.[steamId]})`);
+      log("Tip", `Claimed match ${row.id} for steam ${steamId} (user_id=${row.user_id})`);
+
+      // Diagnostic: show what canMessageUser sees
+      const friendKeys = Object.keys(client.myFriends || client.friends || {});
+      const directLookup = (client.myFriends || client.friends || {})[steamId];
+      log("Tip", `  canMessageUser check: directLookup=${directLookup}, friendKeys.length=${friendKeys.length}`);
 
       if (!canMessageUser(steamId)) {
-        // Log available friends for debugging (first time only)
+        // Log all friend keys for debugging (first match skip only)
         if (skippedIds.size === 0) {
-          const fkeys = Object.keys(client.myFriends || client.friends || {}).slice(0, 5);
-          log("Tip", `Cannot message ${steamId} — not on friends list (sample keys: ${fkeys.join(", ") || "<empty>"}).`);
+          const fkeys = friendKeys.slice(0, 10);
+          log("Tip", `  Cannot message ${steamId} — not on friends list.`);
+          log("Tip", `  Sample friend keys: [${fkeys.map(k => `"${k}"`).join(", ") || "<empty>"}]`);
+          // Try to explain the format
+          if (fkeys.length > 0 && fkeys[0].startsWith("[")) {
+            log("Tip", `  Keys are Steam3 format. Trying conversion...`);
+            try {
+              const accountId = BigInt(steamId) - 76561197960265728n;
+              log("Tip", `  Expected Steam3 key: [U:1:${accountId}]`);
+            } catch (_) {}
+          }
         } else {
-          log("Tip", `Cannot message ${steamId} — not on friends list. Will retry next cycle.`);
+          log("Tip", `  Cannot message ${steamId} — will retry next cycle.`);
         }
         skippedIds.add(row.id);
         await revertTipClaim(row.id);
+        currentClaimedId = null;
         continue;
       }
+
+      log("Tip", `  canMessageUser(${steamId}) = true — proceeding to send.`);
 
       try {
         // Double-check the row hasn't already been sent (guards against pm2 restart overlap)
@@ -584,11 +649,13 @@ const sendPendingMessages = async () => {
         );
         if (guard.rows[0]?.status === "notified") {
           log("Tip", `Match ${row.id} already notified — skipping duplicate send.`);
+          currentClaimedId = null;
           continue;
         }
 
         // 1) Send stats card image URL alone so Steam auto-embeds it as an image
         if (row.tip_image_url) {
+          log("Tip", `  Sending stats card image for match ${row.id}...`);
           await sendSteamMessage(steamId, row.tip_image_url);
           await sleep(2000);
         }
@@ -597,7 +664,7 @@ const sendPendingMessages = async () => {
         const STEAM_MAX = 4500;
         const tipText = row.coach_tip || "";
         if (tipText.length > 0) {
-          log("Tip", `Coach tip for match ${row.id}: ${tipText.length} chars`);
+          log("Tip", `  Sending coach tip for match ${row.id}: ${tipText.length} chars`);
           if (tipText.length <= STEAM_MAX) {
             await sendSteamMessage(steamId, tipText);
             await sleep(2000);
@@ -605,8 +672,11 @@ const sendPendingMessages = async () => {
             // Split on double-newlines (section breaks) to keep sections intact
             const sections = tipText.split(/\n\n/);
             let chunk = "";
+            let chunkNum = 0;
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
+                chunkNum++;
+                log("Tip", `  Sending chunk ${chunkNum} (${chunk.length} chars)...`);
                 await sendSteamMessage(steamId, chunk.trim());
                 await sleep(2000);
                 chunk = "";
@@ -614,27 +684,32 @@ const sendPendingMessages = async () => {
               chunk += (chunk ? "\n\n" : "") + section;
             }
             if (chunk.trim()) {
+              chunkNum++;
+              log("Tip", `  Sending chunk ${chunkNum} (${chunk.length} chars)...`);
               await sendSteamMessage(steamId, chunk.trim());
               await sleep(2000);
             }
           }
         } else {
-          log("Tip", `WARNING: coach_tip is empty for match ${row.id}`);
+          log("Tip", `  WARNING: coach_tip is empty for match ${row.id}`);
         }
 
         // 3) Send match stats link as the last message
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
+        log("Tip", `  Sending match link for match ${row.id}...`);
         await sendSteamMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
 
         await markTipSent(row.id);
+        currentClaimedId = null;
         sent++;
         failures = 0;  // reset consecutive-failure counter
         log("Tip", `✓ Sent coach tip for match ${row.id} — ${tipText.length} chars (${sent} this cycle).`);
       } catch (error) {
-        console.warn(`Failed to send tip to ${steamId}:`, error?.message || error);
+        console.warn(`[Tip] Failed to send tip for match ${row.id} to ${steamId}:`, error?.message || error);
         skippedIds.add(row.id);
-        await revertTipClaim(row.id);
+        await revertTipClaim(row.id).catch(e => log("Tip", `revertTipClaim error: ${e.message}`));
+        currentClaimedId = null;
         failures++;
         if (failures >= MAX_FAILURES_PER_CYCLE) {
           log("Tip", `${failures} consecutive send failures — stopping this cycle.`);
@@ -645,8 +720,13 @@ const sendPendingMessages = async () => {
       // Small delay between messages to avoid Steam rate-limiting
       await sleep(1500);
     }
-    if (sent > 0) {
-      log("Tip", `Cycle done: ${sent} tip(s) delivered, ${skippedIds.size} skipped.`);
+    log("Tip", `Cycle done: ${sent} tip(s) delivered, ${skippedIds.size} skipped.`);
+  } catch (outerErr) {
+    // Safety net: revert any claimed tip that wasn't handled
+    log("Tip", `Unexpected error in tip cycle: ${outerErr?.message || outerErr}`);
+    if (currentClaimedId) {
+      log("Tip", `Safety-reverting claimed match ${currentClaimedId}`);
+      await revertTipClaim(currentClaimedId).catch(e => log("Tip", `Safety revert failed: ${e.message}`));
     }
   } finally {
     isSendingTips = false;
@@ -798,7 +878,10 @@ const startMessagePolling = () => {
   setInterval(() => {
     sendPendingMessages().catch((error) => console.error("[Tip] polling error:", error));
   }, POLL_INTERVAL_MS);
-  sendPendingMessages().catch((error) => console.error("[Tip] polling error:", error));
+  // Run recovery immediately on startup for any tips stuck from previous crash
+  recoverStuckTips().then(() => {
+    sendPendingMessages().catch((error) => console.error("[Tip] polling error:", error));
+  });
 };
 
 client.on("loggedOn", () => {
