@@ -359,21 +359,6 @@ const canMessageUser = (steamId) => {
   );
 };
 
-const sendDownloadMessage = async (steamId, matchId) => {
-  if (!canMessageUser(steamId)) {
-    return;
-  }
-
-  try {
-    client.chat.sendFriendMessage(
-      steamId,
-      `✅ Your match ${matchId} has been downloaded and is ready for stats!`
-    );
-  } catch (error) {
-    console.warn(`Failed to message ${steamId}:`, error);
-  }
-};
-
 /**
  * Atomically claim ONE pending tip using SELECT ... FOR UPDATE SKIP LOCKED
  * so that concurrent instances / restarts never send the same tip twice.
@@ -567,7 +552,6 @@ const processOneMatch = async (row) => {
 
   await markDownloaded(row.id, outputFile);
   log("DL", `Downloaded ${shareCode} → ${outputFile}`);
-  await sendDownloadMessage(row.user_steam_id, row.id);
 
   // Auto-trigger demo parsing in background (throttled)
   triggerParse(row.id);
