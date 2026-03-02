@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { cookies } from "next/headers";
 import { I18nProvider } from "@/app/_components/I18nProvider";
+import { ToastProvider } from "@/app/_components/Toast";
 import { getDirection, normalizeLanguage, LANG_COOKIE } from "@/lib/i18n";
 import "./globals.css";
 
@@ -46,7 +47,10 @@ export default async function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <I18nProvider lang={lang}>{children}</I18nProvider>
+        <I18nProvider lang={lang}>
+          {children}
+          <ToastProvider />
+        </I18nProvider>
       </body>
     </html>
   );

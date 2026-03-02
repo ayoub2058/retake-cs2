@@ -106,6 +106,17 @@ body.lang-switching {
   }
 }
 
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @keyframes pulseGlow {
   0%, 100% {
     box-shadow: 0 0 0 0 rgba(213, 255, 76, 0);
@@ -134,6 +145,10 @@ body.lang-switching {
   animation: slideInLeft 0.4s ease both;
 }
 
+.animate-slide-up {
+  animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
 .animate-pulse-glow {
   animation: pulseGlow 3s ease-in-out infinite;
 }
@@ -157,6 +172,7 @@ body.lang-switching {
   }
   .animate-fade-in,
   .animate-slide-left,
+  .animate-slide-up,
   .animate-pulse-glow,
   .animate-count-up {
     animation: none;

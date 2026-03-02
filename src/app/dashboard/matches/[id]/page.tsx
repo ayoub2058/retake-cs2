@@ -2,6 +2,7 @@ import { getSteamSessionFromCookies } from "@/lib/steamSessionServer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { RoundTimeline } from "@/app/_components/RoundTimeline";
 import { MapIcon } from "@/app/_components/MapIcon";
+import { CoachingTip } from "@/app/_components/CoachingTip";
 import { cookies } from "next/headers";
 import {
   getLocale,
@@ -182,6 +183,15 @@ export default async function MatchDetailsPage({
     .eq("match_id", resolvedMatch.id)
     .order("round_number", { ascending: true });
 
+  // Fetch coaching tip & stats card from the download queue
+  const { data: tipRow } = await supabaseAdmin
+    .from("matches_to_download")
+    .select("coach_tip, tip_image_url")
+    .eq("id", Number.isNaN(matchId) ? -1 : matchId)
+    .maybeSingle();
+  const coachTip: string | null = tipRow?.coach_tip ?? null;
+  const tipImageUrl: string | null = tipRow?.tip_image_url ?? null;
+
   if (playersError) {
     return (
       <div className="rounded-3xl glass-card p-8 text-white">
@@ -235,6 +245,34 @@ export default async function MatchDetailsPage({
     displayMap = extractMapFromPath(queueRow?.file_path ?? null);
   }
 
+  // ── Performance Rating (HLTV-style approximation) ──
+  const totalRounds = Math.max(sortedRounds.length, 1);
+  const computeRating = (p: PlayerRow) => {
+    const k = p.kills ?? 0;
+    const d = p.deaths ?? 0;
+    const a = p.assists ?? 0;
+    const adr = p.adr ?? 0;
+    const ok = p.opening_kills ?? 0;
+    const kpr = k / totalRounds;
+    const dpr = d / totalRounds;
+    // Simplified HLTV 2.0-inspired formula
+    return Math.max(
+      0,
+      0.3591 * kpr - 0.5329 * dpr + 0.0032 * adr + 0.1587 + 0.08 * (ok / totalRounds) + 0.05 * (a / totalRounds)
+    );
+  };
+  const ratingMap = new Map<string, number>();
+  for (const p of allPlayers) {
+    ratingMap.set(p.steam_id, computeRating(p));
+  }
+
+  const getRatingColor = (rating: number) => {
+    if (rating >= 1.3) return "text-emerald-400";
+    if (rating >= 1.0) return "text-[#d5ff4c]";
+    if (rating >= 0.8) return "text-amber-400";
+    return "text-rose-400";
+  };
+
   const renderTable = (rows: PlayerRow[], label: string) => {
     if (!rows.length) {
       return null;
@@ -255,6 +293,8 @@ export default async function MatchDetailsPage({
             const deaths = player.deaths ?? 0;
             const kdText = `${kills}/${deaths}`;
             const openingText = `${player.opening_kills ?? 0}/${player.opening_deaths ?? 0}`;
+            const rating = ratingMap.get(player.steam_id) ?? 0;
+            const ratingColor = getRatingColor(rating);
             return (
               <div key={player.steam_id} className={rowClass}>
                 <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-5 sm:px-8 sm:py-6">
@@ -266,8 +306,13 @@ export default async function MatchDetailsPage({
                       </span>
                     ) : null}
                   </div>
-                  <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs uppercase tracking-[0.2em] text-white/70">
-                    {t("kdLabel")} {kdText}
+                  <div className="flex items-center gap-2">
+                    <div className={`rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold ${ratingColor}`}>
+                      {rating.toFixed(2)}
+                    </div>
+                    <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs uppercase tracking-[0.2em] text-white/70">
+                      {t("kdLabel")} {kdText}
+                    </div>
                   </div>
                 </div>
                 <div className="grid gap-4 px-6 pb-6 text-sm sm:grid-cols-2 sm:px-8 lg:grid-cols-3">
@@ -383,6 +428,9 @@ export default async function MatchDetailsPage({
           </div>
         ) : null}
       </div>
+
+      {/* AI Coaching Tip & Stats Card */}
+      <CoachingTip coachTip={coachTip} tipImageUrl={tipImageUrl} />
     </div>
   );
 }

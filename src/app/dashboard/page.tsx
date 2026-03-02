@@ -3,6 +3,7 @@ import { createServerSupabaseClient } from "@/lib/supabaseServer";
 import { getSteamSessionFromCookies } from "@/lib/steamSessionServer";
 import { MatchTable } from "@/app/_components/MatchTable";
 import { BotSettings } from "@/app/_components/BotSettings";
+import { RecentForm } from "@/app/_components/RecentForm";
 import { cookies } from "next/headers";
 import { getTranslations, normalizeLanguage, LANG_COOKIE } from "@/lib/i18n";
 
@@ -119,6 +120,7 @@ export default async function DashboardPage() {
               {rows.length} {rows.length === 1 ? "match" : "matches"} tracked
             </p>
           </div>
+          <RecentForm results={mappedRows.map((m) => m.result)} />
         </div>
 
         {rows.length === 0 ? (

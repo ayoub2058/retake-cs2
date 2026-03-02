@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { createBrowserSupabaseClient } from "@/lib/supabaseClient";
 import { useI18n } from "@/app/_components/I18nProvider";
+import { toast } from "@/app/_components/Toast";
 
 type BotSettingsProps = {
   userId: string;
@@ -75,10 +76,10 @@ export function BotSettings({ userId }: BotSettingsProps) {
       if (error) {
         throw error;
       }
-      alert(t("settingsSaved"));
+      toast.success(t("settingsSaved"));
     } catch (err) {
       console.error("Failed to save settings", err);
-      alert(t("settingsSaveFailed"));
+      toast.error(t("settingsSaveFailed"));
     } finally {
       setIsSaving(false);
     }

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { GlobalSearch } from "@/app/_components/GlobalSearch";
 import { LanguageSelector } from "@/app/_components/LanguageSelector";
+import { MobileSidebarToggle } from "@/app/_components/MobileSidebar";
 import { getTranslations, normalizeLanguage, LANG_COOKIE } from "@/lib/i18n";
 
 export default async function DashboardLayout({
@@ -13,8 +14,8 @@ export default async function DashboardLayout({
   const t = getTranslations(lang);
   return (
     <div className="flex h-screen w-full overflow-hidden text-white">
-      {/* Sidebar */}
-      <aside className="group/sidebar h-full w-64 flex-shrink-0 border-r border-white/[0.06] bg-gradient-to-b from-black/80 via-black/70 to-black/80 backdrop-blur-xl">
+      {/* Sidebar — hidden on mobile */}
+      <aside className="group/sidebar hidden h-full w-64 flex-shrink-0 border-r border-white/[0.06] bg-gradient-to-b from-black/80 via-black/70 to-black/80 backdrop-blur-xl lg:block">
         <div className="flex h-full flex-col px-5 py-8">
           {/* Logo */}
           <div className="mb-8 flex items-center gap-3">
@@ -71,7 +72,7 @@ export default async function DashboardLayout({
 
           {/* Version */}
           <p className="mt-4 text-center text-[9px] uppercase tracking-[0.3em] text-white/20">
-            v1.0
+            v2.0
           </p>
         </div>
       </aside>
@@ -81,7 +82,12 @@ export default async function DashboardLayout({
         <div className="mx-auto w-full max-w-[1920px] p-6 lg:p-8">
           {/* Top bar with search */}
           <div className="mb-8 flex items-center justify-between gap-4">
-            <GlobalSearch />
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <MobileSidebarToggle />
+              <div className="flex-1 min-w-0">
+                <GlobalSearch />
+              </div>
+            </div>
             <div className="hidden items-center gap-2 md:flex">
               <span className="status-dot online" />
               <span className="text-xs text-white/50">Connected</span>
