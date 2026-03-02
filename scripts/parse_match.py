@@ -423,10 +423,13 @@ def parse_stats(
     except TypeError:
         parser = DemoParser(demo_path)
 
-    # ── Rich Demo parser for positional + utility data ──
+    # ── Rich Demo parser for positional + utility + tactical data ──
     rich_kills_df: Optional[pd.DataFrame] = None
     rich_smokes_df: Optional[pd.DataFrame] = None
     rich_infernos_df: Optional[pd.DataFrame] = None
+    rich_damages_df: Optional[pd.DataFrame] = None
+    rich_shots_df: Optional[pd.DataFrame] = None
+    rich_bomb_df: Optional[pd.DataFrame] = None
     player_blind_df: Optional[pd.DataFrame] = None
     try:
         demo_rich = AwpyDemo(demo_path)
@@ -440,6 +443,18 @@ def parse_stats(
         _ri = demo_rich.infernos
         if _ri is not None and len(_ri) > 0:
             rich_infernos_df = _ri.to_pandas() if hasattr(_ri, "to_pandas") else pd.DataFrame(_ri.to_dict())
+        # Damages (per-hit data with positions)
+        _rd = demo_rich.damages
+        if _rd is not None and len(_rd) > 0:
+            rich_damages_df = _rd.to_pandas() if hasattr(_rd, "to_pandas") else pd.DataFrame(_rd.to_dict())
+        # Shots (weapon_fire with positions)
+        _rsh = demo_rich.shots
+        if _rsh is not None and len(_rsh) > 0:
+            rich_shots_df = _rsh.to_pandas() if hasattr(_rsh, "to_pandas") else pd.DataFrame(_rsh.to_dict())
+        # Bomb events (plant/defuse/drop)
+        _rb = demo_rich.bomb
+        if _rb is not None and len(_rb) > 0:
+            rich_bomb_df = _rb.to_pandas() if hasattr(_rb, "to_pandas") else pd.DataFrame(_rb.to_dict())
         # Parse player_blind events
         _blind_evts = demo_rich.parse_events(["player_blind"])
         if "player_blind" in _blind_evts:
@@ -493,6 +508,115 @@ def parse_stats(
     # Build per-round flash blind data: round → {thrower_id: [{blinded_player, duration}]}
     # (assigned to rounds later after rounds_df is parsed, since player_blind lacks round_num)
     flash_blind_data: Dict[int, List[Dict[str, Any]]] = {}
+
+    # ── Build per-round accuracy data from shots + damages ──
+    # accuracy_per_round: round → {shots_fired, hits, accuracy_pct}
+    accuracy_per_round: Dict[int, Dict[str, Any]] = {}
+    if rich_shots_df is not None and not rich_shots_df.empty and "player_steamid" in rich_shots_df.columns:
+        try:
+            _shots_tmp = rich_shots_df.copy()
+            _shots_tmp["player_steamid"] = _shots_tmp["player_steamid"].astype(str).str.strip()
+            # Filter out grenade/knife "shots"
+            _weapon_col = "weapon" if "weapon" in _shots_tmp.columns else None
+            if _weapon_col:
+                _shots_tmp = _shots_tmp[~_shots_tmp[_weapon_col].str.contains(
+                    "grenade|flashbang|smokegrenade|decoy|molotov|incgrenade|knife|bayonet|c4",
+                    case=False, na=False
+                )]
+            _shots_grouped = _shots_tmp.groupby(["round_num", "player_steamid"]).size().reset_index(name="shots")
+            for _, row in _shots_grouped.iterrows():
+                sid = str(row["player_steamid"]).strip()
+                rn = int(row["round_num"])
+                accuracy_per_round.setdefault(rn, {}).setdefault("shots_by_player", {})[sid] = int(row["shots"])
+        except Exception:
+            pass
+    if rich_damages_df is not None and not rich_damages_df.empty and "attacker_steamid" in rich_damages_df.columns:
+        try:
+            _dmg_tmp = rich_damages_df.copy()
+            _dmg_tmp["attacker_steamid"] = _dmg_tmp["attacker_steamid"].astype(str).str.strip()
+            _hits_grouped = _dmg_tmp.groupby(["round_num", "attacker_steamid"]).size().reset_index(name="hits")
+            for _, row in _hits_grouped.iterrows():
+                sid = str(row["attacker_steamid"]).strip()
+                rn = int(row["round_num"])
+                accuracy_per_round.setdefault(rn, {}).setdefault("hits_by_player", {})[sid] = int(row["hits"])
+        except Exception:
+            pass
+
+    # ── Build per-round damage dealt/taken ──
+    # dmg_per_round: round → {dealt: int, taken: int} (for target player, computed later once target_steam_id known)
+    # Store raw data now, compute per-player after target is determined
+    rich_damages_raw = rich_damages_df  # alias — will compute per-player later
+
+    # ── Build hitgroup distribution from damages dealt by target ──
+    # Will be computed once target_steam_id is known (after player matching)
+
+    # ── Build positions played per round from shots ──
+    positions_per_round: Dict[int, List[str]] = {}
+    if rich_shots_df is not None and not rich_shots_df.empty and "player_place" in rich_shots_df.columns:
+        try:
+            _shots_tmp2 = rich_shots_df.copy()
+            _shots_tmp2["player_steamid"] = _shots_tmp2["player_steamid"].astype(str).str.strip()
+            for rn_val in _shots_tmp2["round_num"].unique():
+                _rn_int = int(rn_val)
+                positions_per_round[_rn_int] = {}  # type: ignore  # overwritten below
+            # Store per-player positions — will filter to target later
+            _pos_grouped = _shots_tmp2.groupby(["round_num", "player_steamid"])["player_place"].apply(
+                lambda x: list(x.dropna().unique())
+            ).reset_index(name="places")
+            _positions_all: Dict[int, Dict[str, List[str]]] = {}
+            for _, row in _pos_grouped.iterrows():
+                rn = int(row["round_num"])
+                sid = str(row["player_steamid"]).strip()
+                _positions_all.setdefault(rn, {})[sid] = row["places"]
+            positions_per_round = _positions_all  # type: ignore
+        except Exception:
+            positions_per_round = {}
+
+    # ── Build weapon used per round from shots ──
+    weapon_per_round: Dict[int, Dict[str, str]] = {}  # round → {player_id: primary_weapon}
+    if rich_shots_df is not None and not rich_shots_df.empty:
+        try:
+            _shots_tmp3 = rich_shots_df.copy()
+            _shots_tmp3["player_steamid"] = _shots_tmp3["player_steamid"].astype(str).str.strip()
+            if "weapon" in _shots_tmp3.columns:
+                _shots_tmp3 = _shots_tmp3[~_shots_tmp3["weapon"].str.contains(
+                    "grenade|flashbang|smokegrenade|decoy|molotov|incgrenade|knife|bayonet|c4",
+                    case=False, na=False
+                )]
+            _wpn_grouped = _shots_tmp3.groupby(["round_num", "player_steamid"])["weapon"].agg(
+                lambda x: x.mode().iloc[0] if len(x) > 0 else "unknown"
+            ).reset_index(name="primary_weapon")
+            for _, row in _wpn_grouped.iterrows():
+                rn = int(row["round_num"])
+                sid = str(row["player_steamid"]).strip()
+                weapon_per_round.setdefault(rn, {})[sid] = str(row["primary_weapon"]).replace("weapon_", "")
+        except Exception:
+            weapon_per_round = {}
+
+    # ── Build trade kill data from rich kills ──
+    trade_kills_rounds: List[Dict[str, Any]] = []
+    got_traded_rounds: List[Dict[str, Any]] = []
+    # Will be computed once target_steam_id is determined
+
+    # ── Build bomb events per round ──
+    bomb_events_per_round: Dict[int, List[Dict[str, str]]] = {}  # round → [{event, player, bombsite}]
+    if rich_bomb_df is not None and not rich_bomb_df.empty:
+        try:
+            for _, row in rich_bomb_df.iterrows():
+                rn = row.get("round_num")
+                if not rn:
+                    continue
+                event = str(row.get("event", "")).strip()
+                if event not in ("planted", "defused", "exploded"):
+                    continue
+                bomb_events_per_round.setdefault(int(rn), []).append({
+                    "event": event,
+                    "player": str(row.get("name", "")).strip(),
+                    "player_steamid": str(row.get("steamid", "")).strip(),
+                    "bombsite": str(row.get("bombsite", "")).strip() or "?",
+                })
+        except Exception:
+            bomb_events_per_round = {}
 
     def find_col(df, candidates):
         for name in candidates:
@@ -1423,6 +1547,101 @@ def parse_stats(
         )
     fav_weapon = max(weapon_counts, key=weapon_counts.get) if weapon_counts else None
 
+    # ── Target-player-specific rich data (needs target_steam_id) ──
+    # Per-round damage dealt/taken
+    dmg_dealt_per_round: Dict[int, int] = {}
+    dmg_taken_per_round: Dict[int, int] = {}
+    hitgroup_distribution: Dict[str, int] = {}
+    if rich_damages_raw is not None and not rich_damages_raw.empty:
+        try:
+            _dmg_all = rich_damages_raw.copy()
+            _dmg_all["attacker_steamid"] = _dmg_all["attacker_steamid"].astype(str).str.strip()
+            _dmg_all["victim_steamid"] = _dmg_all["victim_steamid"].astype(str).str.strip()
+            _user_dealt = _dmg_all[_dmg_all["attacker_steamid"] == target_steam_id]
+            _user_taken = _dmg_all[_dmg_all["victim_steamid"] == target_steam_id]
+            dmg_dealt_per_round = _user_dealt.groupby("round_num")["dmg_health_real"].sum().astype(int).to_dict()
+            dmg_taken_per_round = _user_taken.groupby("round_num")["dmg_health_real"].sum().astype(int).to_dict()
+            # Hitgroup where this player's bullets land
+            if "hitgroup" in _user_dealt.columns:
+                hitgroup_distribution = _user_dealt["hitgroup"].value_counts().to_dict()
+        except Exception:
+            pass
+
+    # Per-round accuracy for the target
+    user_accuracy_per_round: Dict[int, Dict[str, Any]] = {}
+    for rn, rdata in accuracy_per_round.items():
+        shots_by = rdata.get("shots_by_player", {})
+        hits_by = rdata.get("hits_by_player", {})
+        s = shots_by.get(target_steam_id, 0)
+        h = hits_by.get(target_steam_id, 0)
+        if s > 0:
+            user_accuracy_per_round[rn] = {
+                "shots": s, "hits": h,
+                "accuracy": round(h / s * 100, 1)
+            }
+
+    # Positions played by target per round
+    user_positions_per_round: Dict[int, List[str]] = {}
+    if isinstance(positions_per_round, dict):
+        for rn, player_positions in positions_per_round.items():
+            if isinstance(player_positions, dict):
+                user_pos = player_positions.get(target_steam_id, [])
+                if user_pos:
+                    user_positions_per_round[int(rn)] = user_pos
+
+    # Weapon used by target per round
+    user_weapon_per_round: Dict[int, str] = {}
+    for rn, player_weapons in weapon_per_round.items():
+        if isinstance(player_weapons, dict):
+            user_wpn = player_weapons.get(target_steam_id)
+            if user_wpn:
+                user_weapon_per_round[int(rn)] = user_wpn
+
+    # Trade kills analysis
+    TRADE_WINDOW_TICKS = 5 * 128  # ~5 seconds at 128-tick
+    if rich_kills_df is not None and not rich_kills_df.empty:
+        try:
+            _tk_df = rich_kills_df.copy()
+            _tk_df["attacker_steamid"] = _tk_df["attacker_steamid"].astype(str).str.strip()
+            _tk_df["victim_steamid"] = _tk_df["victim_steamid"].astype(str).str.strip()
+            # Determine target's side
+            _target_side = None
+            for _, _trow in _tk_df.iterrows():
+                if str(_trow["attacker_steamid"]) == target_steam_id:
+                    _target_side = str(_trow.get("attacker_side", "")).strip()
+                    break
+                if str(_trow["victim_steamid"]) == target_steam_id:
+                    _target_side = str(_trow.get("victim_side", "")).strip()
+                    break
+            if _target_side:
+                for _rn_val in _tk_df["round_num"].unique():
+                    _rk_sorted = _tk_df[_tk_df["round_num"] == _rn_val].sort_values("tick")
+                    _prev = None
+                    for _, _k in _rk_sorted.iterrows():
+                        if _prev is not None:
+                            # Player trade-killed: teammate died, then player killed the enemy within window
+                            if (str(_prev.get("victim_side", "")) == _target_side
+                                    and str(_prev["victim_steamid"]) != target_steam_id
+                                    and str(_k["attacker_steamid"]) == target_steam_id
+                                    and _k["tick"] - _prev["tick"] <= TRADE_WINDOW_TICKS):
+                                trade_kills_rounds.append({
+                                    "round": int(_rn_val),
+                                    "traded_for": str(_prev.get("victim_name", "?")),
+                                    "killed": str(_k.get("victim_name", "?")),
+                                })
+                            # Player got traded: player died, then teammate killed the enemy
+                            if (str(_prev["victim_steamid"]) == target_steam_id
+                                    and str(_k.get("attacker_side", "")) == _target_side
+                                    and _k["tick"] - _prev["tick"] <= TRADE_WINDOW_TICKS):
+                                got_traded_rounds.append({
+                                    "round": int(_rn_val),
+                                    "traded_by": str(_k.get("attacker_name", "?")),
+                                    "killed": str(_k.get("victim_name", "?")),
+                                })
+                        _prev = _k
+        except Exception:
+            pass
+
     match_meta: Dict[str, Any] = {}
     match_meta["match_id"] = extract_match_id_from_path(demo_path, match_id)
     match_meta["map_name"] = (
@@ -1916,6 +2135,15 @@ def parse_stats(
         "utility_per_round": utility_per_round,
         "flash_blind_data": flash_blind_data,
         "target_steam_id": target_steam_id,
+        "user_accuracy_per_round": user_accuracy_per_round,
+        "dmg_dealt_per_round": dmg_dealt_per_round,
+        "dmg_taken_per_round": dmg_taken_per_round,
+        "hitgroup_distribution": hitgroup_distribution,
+        "user_positions_per_round": user_positions_per_round,
+        "user_weapon_per_round": user_weapon_per_round,
+        "trade_kills_rounds": trade_kills_rounds,
+        "got_traded_rounds": got_traded_rounds,
+        "bomb_events_per_round": bomb_events_per_round,
     }
 
 
@@ -1967,6 +2195,15 @@ def get_ai_coaching_tip(
     utility_per_round = stats.get("utility_per_round") or {}
     flash_blind_data = stats.get("flash_blind_data") or {}
     target_steam_id_for_tip = str(stats.get("target_steam_id") or "").strip()
+    user_accuracy_per_round = stats.get("user_accuracy_per_round") or {}
+    dmg_dealt_per_round = stats.get("dmg_dealt_per_round") or {}
+    dmg_taken_per_round = stats.get("dmg_taken_per_round") or {}
+    hitgroup_distribution = stats.get("hitgroup_distribution") or {}
+    user_positions_per_round = stats.get("user_positions_per_round") or {}
+    user_weapon_per_round = stats.get("user_weapon_per_round") or {}
+    trade_kills_rounds = stats.get("trade_kills_rounds") or []
+    got_traded_rounds = stats.get("got_traded_rounds") or []
+    bomb_events_per_round = stats.get("bomb_events_per_round") or {}
 
     if team_size:
         opening_advantage = f"{team_size}v{team_size - 1}"
@@ -2142,6 +2379,39 @@ def get_ai_coaching_tip(
                 flash_dur = max(b.get("duration", 0) for b in user_got_flashed)
                 parts.append(f"was flashed by enemy for {flash_dur}s before death")
 
+            # Accuracy this round
+            acc_data = user_accuracy_per_round.get(rn)
+            if acc_data:
+                parts.append(f"accuracy: {acc_data['hits']}/{acc_data['shots']} shots hit ({acc_data['accuracy']}%)")
+
+            # Damage dealt/taken this round
+            dealt = dmg_dealt_per_round.get(rn, 0)
+            taken = dmg_taken_per_round.get(rn, 0)
+            if dealt or taken:
+                parts.append(f"dmg: {dealt} dealt / {taken} taken")
+
+            # Weapon this round
+            wpn_rn = user_weapon_per_round.get(rn)
+            if wpn_rn:
+                parts.append(f"weapon: {wpn_rn}")
+
+            # Positions played this round
+            pos_rn = user_positions_per_round.get(rn, [])
+            if pos_rn:
+                parts.append(f"positions: {', '.join(pos_rn)}")
+
+            # Bomb events this round
+            bomb_evts = bomb_events_per_round.get(rn, [])
+            for be in bomb_evts:
+                be_player = be.get("player", "?")
+                be_event = be.get("event", "?")
+                be_site = be.get("bombsite", "?")
+                is_target = be.get("player_steamid") == target_steam_id_for_tip
+                if is_target:
+                    parts.append(f"YOU {be_event} bomb at {be_site}")
+                else:
+                    parts.append(f"{be_player} {be_event} bomb at {be_site}")
+
             stats_lines.append(" | ".join(parts))
 
     # ── Round highlights (multi-kills, clutches) ──
@@ -2200,6 +2470,75 @@ def get_ai_coaching_tip(
         stats_lines.append(f"Median death time into round: {median_death_time_sec}s")
     if avg_death_distance is not None:
         stats_lines.append(f"Avg death distance from attacker: {avg_death_distance} units")
+
+    # ── Accuracy & Aim Analysis ──
+    if user_accuracy_per_round:
+        stats_lines.append("")
+        stats_lines.append("-- Accuracy Summary --")
+        total_shots = sum(v.get("shots", 0) for v in user_accuracy_per_round.values())
+        total_hits = sum(v.get("hits", 0) for v in user_accuracy_per_round.values())
+        overall_acc = round(total_hits / total_shots * 100, 1) if total_shots else 0
+        stats_lines.append(f"Overall accuracy: {total_hits}/{total_shots} = {overall_acc}%")
+        # Worst accuracy rounds (potential whiff rounds)
+        worst_rounds = sorted(
+            [(rn, v) for rn, v in user_accuracy_per_round.items() if v.get("shots", 0) >= 3],
+            key=lambda x: x[1].get("accuracy", 100)
+        )[:3]
+        if worst_rounds:
+            stats_lines.append("Worst accuracy rounds:")
+            for rn, v in worst_rounds:
+                stats_lines.append(f"  Round {rn}: {v['hits']}/{v['shots']} = {v['accuracy']}%")
+        # Best accuracy rounds
+        best_rounds = sorted(
+            [(rn, v) for rn, v in user_accuracy_per_round.items() if v.get("shots", 0) >= 3],
+            key=lambda x: -x[1].get("accuracy", 0)
+        )[:3]
+        if best_rounds:
+            stats_lines.append("Best accuracy rounds:")
+            for rn, v in best_rounds:
+                stats_lines.append(f"  Round {rn}: {v['hits']}/{v['shots']} = {v['accuracy']}%")
+
+    if hitgroup_distribution:
+        stats_lines.append("")
+        stats_lines.append("-- Aim Distribution (where your bullets land) --")
+        total_hits_hg = sum(hitgroup_distribution.values())
+        for hg, count in sorted(hitgroup_distribution.items(), key=lambda x: -x[1]):
+            pct = round(count / total_hits_hg * 100, 1) if total_hits_hg else 0
+            stats_lines.append(f"  {hg}: {count} hits ({pct}%)")
+
+    # ── Trade Kill Analysis ──
+    if trade_kills_rounds or got_traded_rounds:
+        stats_lines.append("")
+        stats_lines.append("-- Trade Kills --")
+        if trade_kills_rounds:
+            stats_lines.append(f"You traded for teammates in {len(trade_kills_rounds)} round(s):")
+            for tk in trade_kills_rounds:
+                stats_lines.append(f"  Round {tk['round']}: traded for {tk['traded_for']} by killing {tk['killed']}")
+        if got_traded_rounds:
+            stats_lines.append(f"You were traded (avenged) in {len(got_traded_rounds)} round(s):")
+            for gt in got_traded_rounds:
+                stats_lines.append(f"  Round {gt['round']}: {gt['traded_by']} avenged you by killing {gt['killed']}")
+        untradable_deaths = [
+            rn for rn in user_round_deaths
+            if rn not in [gt["round"] for gt in got_traded_rounds]
+        ]
+        if untradable_deaths:
+            stats_lines.append(f"Deaths NOT traded (you died in a position teammates couldn't trade): rounds {', '.join(str(r) for r in untradable_deaths)}")
+
+    # ── Positioning Heatmap ──
+    if user_positions_per_round:
+        stats_lines.append("")
+        stats_lines.append("-- Positioning Heatmap (where you played each round) --")
+        position_frequency: Dict[str, int] = {}
+        for rn_val in sorted(user_positions_per_round.keys()):
+            places = user_positions_per_round[rn_val]
+            stats_lines.append(f"  Round {rn_val}: {', '.join(places)}")
+            for p in places:
+                position_frequency[p] = position_frequency.get(p, 0) + 1
+        if position_frequency:
+            stats_lines.append("Most frequented positions:")
+            for pos, freq in sorted(position_frequency.items(), key=lambda x: -x[1])[:5]:
+                stats_lines.append(f"  {pos}: {freq} rounds")
 
     # ── Round flow: score progression + win reasons ──
     if rounds_history:
@@ -2285,47 +2624,63 @@ def get_ai_coaching_tip(
             "IMPORTANT: The player has ALREADY received a visual stats card with all their numbers "
             "(K/D, ADR, HS%, scoreboard, round timeline, death analysis). "
             "Do NOT repeat or recite any stats. Do NOT create a stats summary. "
-            "Your ONLY job is to provide COACHING — analyze what went wrong and how to fix it.\n\n"
-            "The Per-Round Kill/Death Log contains EXACT positions (map callouts like 'Mid', 'BombsiteA', 'Apartments', etc.), "
-            "the exact weapon used, whether it was through smoke, whether you were flashed, and utility usage. "
-            "USE THIS DATA to give position-specific coaching.\n\n"
-            "Structure the response like this:\n\n"
-            "1. MATCH STORY — A short narrative of how the match unfolded. "
-            "Group rounds into phases (e.g., 'Rounds 1-4: strong start' or 'Rounds 8-12: momentum lost'). "
-            "For each phase, explain what the player did right or wrong and how the score shifted.\n\n"
-            "2. ROUND-BY-ROUND MISTAKES — Go through EVERY round where the player died. "
-            "For each death round, use the EXACT position data to explain:\n"
-            "  - WHERE they were on the map when they died (use the callout from the data)\n"
-            "  - WHERE the enemy was when they killed the player (use the enemy position callout)\n"
-            "  - What weapon killed them and what that DISTANCE + POSITION combination reveals\n"
-            "    (e.g., 'You were at TopofMid and got AWP'd from Arch at 20u — you peeked without flash')\n"
-            "  - If they were flashed before death: 'You got flashed for Xs, don't peek without clearing flash'\n"
-            "  - If they used no utility that round: call out that they dry-peeked\n"
-            "  - If they threw a flash but self-flashed: 'bad flash — turn away or use a pop flash'\n"
-            "  - Specific advice for that POSITION on that MAP (e.g., 'on Inferno, don't peek TopofMid without smoking Arch first')\n"
-            "  - What they should have done differently at that exact position\n"
-            "  - If 0 kills that round, call it out as a zero-impact round\n\n"
-            "3. POSITIONING PATTERNS — Analyze WHERE the player keeps dying:\n"
-            "  - Are they dying in the same position repeatedly? (e.g., 'You died at Mid 3 times')\n"
-            "  - Are they in positions that are too exposed for their weapon?\n"
-            "  - Were they using utility (smokes/flashes/molotovs) before peeking?\n"
-            "  - What angles should they hold instead?\n"
-            "  - If they got kills, what positions worked well for them?\n\n"
-            "4. COMPARED TO TEAMMATES — Without reciting numbers:\n"
-            "  - Was the player carrying or being carried?\n"
-            "  - Who on the team was more impactful and why?\n"
-            "  - Did the player support their team with trades and utility?\n\n"
-            "5. COACHING PLAN — 4-6 specific, actionable improvements:\n"
-            "  - Reference exact rounds AND positions from THIS match\n"
-            "  - Give concrete advice for MAP-SPECIFIC positions (name the spots)\n"
-            "  - Tell them exactly which utility to throw before peeking specific angles\n"
-            "  - 'In Round 5, you dry-peeked TopofMid — next time throw a flash off the wall at X first'\n"
-            "  - If dying to AWP at long range, suggest smoking or flashing the angle\n"
-            "  - If dying close-range, suggest holding tighter angles or using molotovs\n"
-            "  - If self-flashing, explain proper pop-flash technique for that map position\n\n"
-            "Be honest, direct, and constructive. Talk like a real coach doing a VOD review.\n"
-            "Reference specific round numbers AND map positions throughout — do NOT speak in generalities.\n"
-            "Use the EXACT position names from the data (like 'TopofMid', 'BombsiteA', 'Apartments')."
+            "Your ONLY job is to provide DEEP, DETAILED COACHING — analyze what went wrong tactically and how to fix it.\n\n"
+            "You have access to incredibly detailed round-by-round data including:\n"
+            "- EXACT map positions (callouts) for every kill and death\n"
+            "- Shot accuracy per round (shots fired vs hits)\n"
+            "- Damage dealt and taken per round\n"
+            "- Utility usage (smokes, molotovs) and flash effectiveness per round\n"
+            "- Player positions throughout each round (where they moved/played)\n"
+            "- Trade kill data (whether deaths were traded by teammates)\n"
+            "- Hitgroup distribution (where the player's bullets land — head, chest, legs)\n"
+            "- Bomb events (plants, defuses) per round\n"
+            "- Weapon choices per round\n\n"
+            "Structure your analysis as a DEEP coaching review:\n\n"
+            "1. MATCH NARRATIVE — Tell the story of how this match unfolded (3-5 sentences).\n"
+            "   Group rounds into momentum phases (e.g., 'Rounds 1-4: dominant' → 'Rounds 5-8: collapse').\n"
+            "   For each phase, explain WHY momentum shifted — was it aim falling off, bad positioning, economy?\n\n"
+            "2. DEATH-BY-DEATH ANALYSIS — For EVERY round where the player died, provide a mini-breakdown:\n"
+            "   - Their exact position and the enemy's position (use callouts from data)\n"
+            "   - The weapon matchup and distance — was this a fight they should have taken?\n"
+            "   - Their accuracy that round — did they whiff shots or just get outaimed?\n"
+            "   - Did they use utility before engaging? If not, call it a DRY PEEK\n"
+            "   - Were they flashed before dying? For how long?\n"
+            "   - Was their death traded by a teammate? If not, they were in an UNTRADABLE position\n"
+            "   - The SPECIFIC mistake: wrong position, no utility, over-aggressive, bad timing, etc.\n"
+            "   Example: 'Round 8: You were at Middle with an AK, enemy at TopofMid with deagle, 23u away. "
+            "You had 8.7% accuracy (2/23 shots), took 98dmg. No utility used — dry peek into an angle "
+            "where the enemy had the advantage. You should have smoked TopofMid or flashed before peeking.'\n\n"
+            "3. AIM & ACCURACY PATTERNS — Analyze the accuracy data across rounds:\n"
+            "   - Identify rounds where accuracy was terrible (< 15%) — were they spraying at long range?\n"
+            "   - Look at hitgroup data: if most bullets hit chest/stomach, crosshair placement is too low\n"
+            "   - If head hits are < 15% of all hits, they need to work on crosshair placement\n"
+            "   - Connect accuracy drops to specific situations (e.g., 'accuracy drops when you push alone')\n"
+            "   - Note rounds where accuracy was great — what was different about positioning?\n\n"
+            "4. POSITIONING & MOVEMENT — Use the positioning heatmap:\n"
+            "   - Where does the player keep going? Are they predictable?\n"
+            "   - Are they dying in the same spot repeatedly?\n"
+            "   - Are they in tradable positions or isolated?\n"
+            "   - Match their weapon to their position — SMG at long range? Rifle up close?\n"
+            "   - Which positions gave them kills vs which positions got them killed?\n\n"
+            "5. UTILITY USAGE — Analyze their smoke/flash/molotov usage:\n"
+            "   - How many rounds did they use NO utility? Those are wasted resources\n"
+            "   - Did they self-flash? How many times?\n"
+            "   - Did their flashes actually blind enemies? Or were they wasted?\n"
+            "   - Suggest SPECIFIC utility for the specific map positions they keep dying at\n"
+            "   - 'In Round 5 at BombsiteA, throw a smoke towards Apartments before holding that angle'\n\n"
+            "6. TRADE & TEAMPLAY — Analyze trade kills:\n"
+            "   - Were the player's deaths traded by teammates? If not often, they play too isolated\n"
+            "   - Did the player trade for teammates? Good or selfish?\n"
+            "   - Damage output vs deaths — are they getting impact kills or just baiting?\n\n"
+            "7. ACTION PLAN — Give 5-7 SPECIFIC, ACTIONABLE improvements:\n"
+            "   Each tip must reference a REAL round number and map position from THIS match.\n"
+            "   - 'Round X at Y: next time do Z instead'\n"
+            "   - Include specific utility lineups or angles to hold for this MAP\n"
+            "   - Prioritize the fixes that would have the most impact\n\n"
+            "Write like a coach doing a detailed VOD review for a player trying to rank up.\n"
+            "Be honest and direct — if they played badly, say so, but always explain WHY and HOW to fix it.\n"
+            "Use EXACT position names, round numbers, and data from every section throughout.\n"
+            "Make this analysis THOROUGH — the player wants to understand every mistake in detail."
         )
 
     language_prompt = ""
@@ -2350,28 +2705,23 @@ def get_ai_coaching_tip(
         language_prompt = "Output the entire response in English."
 
     prompt = (
-        "You are an elite CS2 coach reviewing a match for your student via Steam chat. "
-        "The player has ALREADY received a visual stats card showing all their numbers — "
-        "K/D, ADR, HS%, scoreboard, round timeline, death analysis. "
-        "Do NOT repeat those stats. Your job is PURE COACHING.\n\n"
+        "You are an elite CS2 coach doing a detailed post-match VOD review for your student. "
+        "The player has ALREADY received a visual stats card with all their numbers. "
+        "Your job is to deliver DEEP TACTICAL COACHING using the rich demo data below.\n\n"
         "CRITICAL RULES:\n"
-        "- Do NOT recite or summarize stats (the player already sees them in the image).\n"
-        "- Focus ONLY on: what went wrong, why, and how to fix it.\n"
-        "- This is a Steam chat message — no markdown (no ### or **bold**).\n"
-        "- Use emojis for section markers, dashes - for bullets, line breaks for structure.\n"
-        "- Reference SPECIFIC ROUND NUMBERS AND MAP POSITIONS for every point you make.\n"
-        "- The data includes exact positions (callouts like 'TopofMid', 'BombsiteA', 'Arch', etc.), "
-        "weapons, distances, flash/smoke context, and utility usage for EVERY kill and death.\n"
-        "- USE these positions to give specific coaching like 'you were at X and got killed from Y — "
-        "next time smoke Y before peeking' or 'you dry-peeked TopofMid without flashing'.\n"
-        "- Do NOT fabricate or invent ANY data. ONLY reference facts explicitly listed below.\n"
-        "- For each death round, ONLY mention the weapon, attacker, and positions shown in the Per-Round Kill/Death Log.\n"
-        "- If position or weapon info is missing for a round, say 'details unavailable' — do NOT guess.\n"
-        "- Do NOT include any URLs or links.\n\n"
+        "- Do NOT recite or summarize stats — analyze them.\n"
+        "- This is a Steam chat message — no markdown (no ### or **bold**). Use emojis for section markers.\n"
+        "- Reference SPECIFIC round numbers, map positions, accuracy numbers, and utility for EVERY point.\n"
+        "- The data below includes per-round accuracy, damage, positions, utility, trade kills, hitgroups, "
+        "and bomb events — USE ALL OF IT to give the deepest analysis possible.\n"
+        "- Do NOT fabricate data. ONLY reference facts from the data below.\n"
+        "- If data is missing for a round, skip it — do NOT guess.\n"
+        "- Do NOT include any URLs or links.\n"
+        "- Be thorough but not repetitive. Make every sentence add value.\n\n"
         + style_prompt
         + "\n\n"
         + language_prompt
-        + "\n\nMatch Stats (from demo):\n"
+        + "\n\nMatch Stats (from demo analysis):\n"
         + "\n".join(stats_lines)
         + ("\n\nEconomy Data:\n- " + "\n- ".join(facts_lines) if facts_lines else "")
     )
@@ -2382,17 +2732,21 @@ def get_ai_coaching_tip(
                 {
                     "role": "system",
                     "content": (
-                        "You are an elite professional CS2 Coach. The player already sees a visual stats card "
-                        "with all numbers. You provide ONLY coaching analysis — mistakes, timing, positioning, "
-                        "and actionable improvement advice. You reference specific round numbers and never give "
-                        "vague tips. You never include URLs or links in your messages. "
-                        "Keep the total response under 4000 characters so it fits in a single Steam message."
+                        "You are an elite CS2 coach who does deep post-match analysis. "
+                        "The player already sees a visual stats card with all numbers. "
+                        "You provide ONLY tactical coaching — positioning mistakes, aim analysis, "
+                        "utility usage critique, trade patterns, and actionable fixes. "
+                        "You always reference specific round numbers, map positions, and data points. "
+                        "You never give vague tips. You never include URLs or links. "
+                        "Your analysis is thorough, detailed, and specific to THIS match. "
+                        "Write naturally — like a real coach talking to a player. "
+                        "Target 3000-4000 characters for a comprehensive review."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
-            max_tokens=1500,
+            max_tokens=2000,
         )
     except Exception as exc:
         raise RuntimeError(f"Groq request failed: {exc}") from exc
