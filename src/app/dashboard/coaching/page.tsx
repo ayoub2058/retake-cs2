@@ -3,6 +3,7 @@ import { getSteamSessionFromCookies } from "@/lib/steamSessionServer";
 import { createServerSupabaseClient } from "@/lib/supabaseServer";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { MapIcon } from "@/app/_components/MapIcon";
+import { FormattedCoachingTip } from "@/app/_components/FormattedCoachingTip";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import {
@@ -123,11 +124,6 @@ export default async function CoachingHistoryPage() {
           {tips.map((tip, index) => {
             const mapName = mapByTipId.get(tip.id) ?? null;
             const result = resultByTipId.get(tip.id) ?? null;
-            const preview = tip.coach_tip
-              ? tip.coach_tip.length > 250
-                ? tip.coach_tip.slice(0, 250) + "..."
-                : tip.coach_tip
-              : "";
             const resultBadge = result === "win"
               ? "bg-emerald-500/15 border-emerald-500/20 text-emerald-400"
               : result === "loss"
@@ -175,9 +171,7 @@ export default async function CoachingHistoryPage() {
                   </Link>
                 </div>
                 <div className="rounded-xl border border-white/[0.06] bg-black/30 px-5 py-4">
-                  <p className="whitespace-pre-line text-sm leading-relaxed text-white/70">
-                    {preview}
-                  </p>
+                  <FormattedCoachingTip text={tip.coach_tip!} previewLength={300} />
                 </div>
               </div>
             );

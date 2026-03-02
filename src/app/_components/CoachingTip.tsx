@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { FormattedCoachingTip } from "@/app/_components/FormattedCoachingTip";
 
 type CoachingTipProps = {
   coachTip: string | null;
@@ -9,12 +10,8 @@ type CoachingTipProps = {
 
 export function CoachingTip({ coachTip, tipImageUrl }: CoachingTipProps) {
   const [imageExpanded, setImageExpanded] = useState(false);
-  const [showFull, setShowFull] = useState(false);
 
   if (!coachTip && !tipImageUrl) return null;
-
-  const isLong = (coachTip?.length ?? 0) > 1000;
-  const displayTip = isLong && !showFull ? coachTip!.slice(0, 1000) + "..." : coachTip;
 
   return (
     <div className="w-full max-w-none space-y-6">
@@ -76,21 +73,7 @@ export function CoachingTip({ coachTip, tipImageUrl }: CoachingTipProps) {
           </div>
 
           <div className="coaching-tip-body rounded-2xl border border-white/[0.06] bg-black/30 px-6 py-5">
-            <p className="whitespace-pre-line text-sm leading-relaxed text-white/80">
-              {displayTip}
-            </p>
-            {isLong && (
-              <button
-                type="button"
-                onClick={() => setShowFull(!showFull)}
-                className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#a78bfa] transition hover:border-[#a78bfa]/30 hover:bg-[#a78bfa]/10"
-              >
-                {showFull ? "Show Less" : "Read Full Analysis"}
-                <svg className={`h-3 w-3 transition-transform ${showFull ? "rotate-180" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="6 9 12 15 18 9" />
-                </svg>
-              </button>
-            )}
+            <FormattedCoachingTip text={coachTip!} />
           </div>
         </div>
       )}
