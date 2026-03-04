@@ -18,7 +18,7 @@ dotenv.config();
 const POLL_INTERVAL_MS = 30_000;
 const GC_RECONNECT_DELAY_MS = 15_000;
 const MAX_CONCURRENT_DOWNLOADS = Number.parseInt(
-  process.env.MAX_CONCURRENT_DOWNLOADS || "3",
+  process.env.MAX_CONCURRENT_DOWNLOADS || "10",
   10
 );
 const MAX_CONCURRENT_PARSES = Number.parseInt(
