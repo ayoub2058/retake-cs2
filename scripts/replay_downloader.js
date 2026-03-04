@@ -667,16 +667,11 @@ const sendPendingMessages = async () => {
       log("Tip", `Claimed match ${row.id} for ${steamId}`);
 
       if (!canMessageUser(steamId)) {
-        // Send friend request ONCE, then cache for 10 min
+        // User is not on friends list — skip quietly (bot only accepts, never sends requests)
         if (!pendingFriendRequests.has(steamId)) {
           pendingFriendRequests.set(steamId, Date.now());
           excludeSteamIds.push(steamId);
-          try {
-            client.addFriend(steamId);
-            log("Tip", `  Friend request sent to ${steamId}. Will retry in ${FRIEND_REQUEST_COOLDOWN_MS / 60000}min.`);
-          } catch (frErr) {
-            log("Tip", `  Failed to send friend request: ${frErr.message}`);
-          }
+          log("Tip", `  ${steamId} not on friends list — skipping. They need to add the bot first.`);
         }
 
         skippedIds.add(row.id);
@@ -983,21 +978,19 @@ client.on("loggedOn", () => {
 });
 
 client.on("friendRelationship", (steamId, relationship) => {
-  // Auto-accept incoming friend requests
+  // Auto-accept incoming friend requests (bot never sends requests)
   if (relationship === SteamUser.EFriendRelationship.RequestRecipient) {
     client.addFriend(steamId);
+    log("Steam", `Accepted friend request from ${steamId}.`);
   }
-  // When someone accepts our request, clear the cooldown so tips deliver immediately
+  // When a new friend is added, clear skip-cache and deliver tips immediately
   if (relationship === SteamUser.EFriendRelationship.Friend) {
     const sid = typeof steamId.getSteamID64 === "function"
       ? steamId.getSteamID64()
       : String(steamId);
-    if (pendingFriendRequests.has(sid)) {
-      pendingFriendRequests.delete(sid);
-      log("Tip", `${sid} accepted friend request — will deliver tips on next cycle.`);
-      // Trigger immediate tip delivery
-      sendPendingMessages().catch(() => {});
-    }
+    pendingFriendRequests.delete(sid);
+    log("Tip", `${sid} is now a friend — delivering pending tips.`);
+    sendPendingMessages().catch(() => {});
   }
 });
 
