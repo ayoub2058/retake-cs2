@@ -82,6 +82,13 @@ let lastConnectedAt = Date.now();
 let disconnectedSince = null;
 const retryAfterByMatchId = new Map();
 
+// Download deduplication: track in-flight downloads by replay URL
+const inflightDownloads = new Map(); // replayUrl → Promise<string>
+
+// Cross-cycle tracking: pending friend requests (don't spam every 30s)
+const pendingFriendRequests = new Map(); // steamId → timestamp
+const FRIEND_REQUEST_COOLDOWN_MS = 10 * 60 * 1000; // 10 min before retrying
+
 const ensureDownloadsDir = async () => {
   await fsp.mkdir(downloadsDir, { recursive: true });
 };
@@ -166,6 +173,19 @@ const markPending = async (id) => {
     `,
     [id]
   );
+};
+
+/** Check if another row with the same share_code already has a downloaded file. */
+const findExistingDownload = async (shareCode, excludeId) => {
+  const result = await pool.query(
+    `SELECT file_path FROM public.matches_to_download
+     WHERE share_code = $1 AND id != $2
+       AND file_path IS NOT NULL
+       AND status NOT IN ('pending', 'error')
+     LIMIT 1`,
+    [shareCode, excludeId]
+  );
+  return result.rows[0]?.file_path || null;
 };
 
 const requestMatch = (shareCode) =>
@@ -283,8 +303,13 @@ const isRetryableFetchError = (error) => {
   return (
     error.name === "AbortError" ||
     causeCode === "UND_ERR_SOCKET" ||
+    causeCode === "ETIMEDOUT" ||
+    causeCode === "ECONNRESET" ||
+    causeCode === "ECONNREFUSED" ||
     message.includes("terminated") ||
-    message.includes("other side closed")
+    message.includes("other side closed") ||
+    message.includes("fetch failed") ||
+    message.includes("ETIMEDOUT")
   );
 };
 
@@ -300,8 +325,9 @@ const downloadReplay = async (url, outputFile) => {
     Connection: "keep-alive",
   };
 
+  log("DL", `⬇ Downloading: ${url}`);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    console.log("🔗 TRYING TO DOWNLOAD:", url);
+    if (attempt > 1) log("DL", `  Retry ${attempt}/${maxAttempts}...`);
     let response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
@@ -447,12 +473,26 @@ const sendSteamMessage = async (steamId, message) => {
   throw new Error("No usable Steam chat API available");
 };
 
+/** Wrapper with automatic retry for transient Steam chat failures. */
+const sendSteamMessageWithRetry = async (steamId, message, maxRetries = 2) => {
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      await sendSteamMessage(steamId, message);
+      return;
+    } catch (err) {
+      if (i === maxRetries) throw err;
+      log("Tip", `  Message send failed (attempt ${i + 1}/${maxRetries + 1}): ${err.message}. Retrying in 3s...`);
+      await sleep(3000);
+    }
+  }
+};
+
 /**
  * Atomically claim ONE pending tip using SELECT ... FOR UPDATE SKIP LOCKED
  * so that concurrent instances / restarts never send the same tip twice.
  * Returns null when there is nothing to send.
  */
-const claimNextTip = async (excludeIds = []) => {
+const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
@@ -466,8 +506,10 @@ const claimNextTip = async (excludeIds = []) => {
         from public.matches_to_download
         where status in ('processed', 'parsed')
           and coach_tip is not null
+          and length(coach_tip) > 0
           and (tip_sent is null or tip_sent = false)
           and id != ALL($1::int[])
+          and user_id::text != ALL($2::text[])
         order by id asc
         limit 1
         for update skip locked
@@ -481,7 +523,7 @@ const claimNextTip = async (excludeIds = []) => {
       from tip
       left join public.users u on u.steam_id::text = tip.user_id::text
       `,
-      [excludeIds]
+      [excludeIds, excludeSteamIds]
     );
     if (!result.rows.length) {
       await db.query("COMMIT");
@@ -558,8 +600,7 @@ const sendPendingMessages = async () => {
     return;
   }
   if (!steamReady) {
-    log("Tip", "Steam not ready — skipping tip cycle.");
-    return;
+    return; // silent — avoids log spam when Steam is reconnecting
   }
 
   // Recover any stuck tips before starting (handles bot crash / restart)
@@ -569,61 +610,72 @@ const sendPendingMessages = async () => {
   const friends = client.myFriends || client.friends || {};
   const friendCount = Object.keys(friends).length;
   if (friendCount === 0) {
-    log("Tip", "Friends list not loaded yet (0 entries) — skipping tip cycle.");
     return;
   }
 
   isSendingTips = true;
-  log("Tip", `Starting tip cycle (${friendCount} friends loaded).`);
 
   // Quick diagnostic: how many tips are pending in DB?
+  let pendingCount = 0;
   try {
     const pendingCheck = await pool.query(
       `SELECT COUNT(*) as cnt FROM public.matches_to_download
        WHERE status IN ('processed', 'parsed')
          AND coach_tip IS NOT NULL
+         AND length(coach_tip) > 0
          AND (tip_sent IS NULL OR tip_sent = false)`
     );
-    log("Tip", `Pending tips in DB: ${pendingCheck.rows[0]?.cnt || 0}`);
+    pendingCount = parseInt(pendingCheck.rows[0]?.cnt || "0", 10);
   } catch (_) { /* non-critical */ }
 
+  // Only log if there's work to do (reduces noise)
+  if (pendingCount === 0) {
+    isSendingTips = false;
+    return;
+  }
+  log("Tip", `Starting tip cycle (${friendCount} friends, ${pendingCount} pending).`);
+
+  // Build cross-cycle exclusion list from pending friend requests
+  const excludeSteamIds = [];
+  const now = Date.now();
+  for (const [steamId, ts] of pendingFriendRequests) {
+    if (now - ts < FRIEND_REQUEST_COOLDOWN_MS) {
+      excludeSteamIds.push(steamId);
+    } else {
+      pendingFriendRequests.delete(steamId); // cooldown expired — retry
+    }
+  }
+  if (excludeSteamIds.length > 0) {
+    log("Tip", `  Skipping ${excludeSteamIds.length} user(s) with pending friend requests.`);
+  }
+
   const skippedIds = new Set();  // track IDs we can't deliver this cycle
-  const skippedSteamIds = new Set();  // track users we already sent friend requests to
   let currentClaimedId = null;   // track currently claimed tip for safety revert
   try {
-    // Process tips one-at-a-time with atomic claim
     let sent = 0;
     let failures = 0;
-    const MAX_FAILURES_PER_CYCLE = 3;  // stop cycling after N consecutive failures
+    const MAX_FAILURES_PER_CYCLE = 3;
     while (true) {
       currentClaimedId = null;
-      const row = await claimNextTip([...skippedIds]);
+      const row = await claimNextTip([...skippedIds], excludeSteamIds);
       if (!row) {
-        log("Tip", "No more pending tips to claim.");
         break;
       }
       currentClaimedId = row.id;
 
       const steamId = row.user_steam_id;
-      log("Tip", `Claimed match ${row.id} for steam ${steamId} (user_id=${row.user_id})`);
-
-      // Diagnostic: show what canMessageUser sees
-      const friendKeys = Object.keys(client.myFriends || client.friends || {});
-      const directLookup = (client.myFriends || client.friends || {})[steamId];
-      log("Tip", `  canMessageUser check: directLookup=${directLookup}, friendKeys.length=${friendKeys.length}`);
+      log("Tip", `Claimed match ${row.id} for ${steamId}`);
 
       if (!canMessageUser(steamId)) {
-        log("Tip", `  Cannot message ${steamId} — not on friends list.`);
-
-        // Auto-send friend request (once per user per cycle)
-        if (!skippedSteamIds.has(steamId)) {
-          skippedSteamIds.add(steamId);
+        // Send friend request ONCE, then cache for 10 min
+        if (!pendingFriendRequests.has(steamId)) {
+          pendingFriendRequests.set(steamId, Date.now());
+          excludeSteamIds.push(steamId);
           try {
-            log("Tip", `  Sending friend request to ${steamId}...`);
             client.addFriend(steamId);
-            log("Tip", `  Friend request sent to ${steamId}. Will retry delivery after they accept.`);
+            log("Tip", `  Friend request sent to ${steamId}. Will retry in ${FRIEND_REQUEST_COOLDOWN_MS / 60000}min.`);
           } catch (frErr) {
-            log("Tip", `  Failed to send friend request to ${steamId}: ${frErr.message}`);
+            log("Tip", `  Failed to send friend request: ${frErr.message}`);
           }
         }
 
@@ -633,93 +685,80 @@ const sendPendingMessages = async () => {
         continue;
       }
 
-      log("Tip", `  canMessageUser(${steamId}) = true — proceeding to send.`);
-
       try {
-        // Double-check the row hasn't already been sent (guards against pm2 restart overlap)
+        // Double-check not already sent (guards against pm2 restart overlap)
         const guard = await pool.query(
-          `SELECT tip_sent, status FROM public.matches_to_download WHERE id = $1`,
+          `SELECT status FROM public.matches_to_download WHERE id = $1`,
           [row.id]
         );
         if (guard.rows[0]?.status === "notified") {
-          log("Tip", `Match ${row.id} already notified — skipping duplicate send.`);
           currentClaimedId = null;
           continue;
         }
 
-        // 1) Send stats card image URL alone so Steam auto-embeds it as an image
-        if (row.tip_image_url) {
-          log("Tip", `  Sending stats card image for match ${row.id}...`);
-          await sendSteamMessage(steamId, row.tip_image_url);
-          await sleep(2000);
-        }
-
-        // 2) Send the AI coaching tip — split into chunks if too long for Steam (~5000 char limit)
+        // ── Send messages: coach tip FIRST (most important), then image, then link ──
         const STEAM_MAX = 4500;
-        const tipText = row.coach_tip || "";
+        const tipText = (row.coach_tip || "").trim();
+        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
+        const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
+
+        // 1) AI coaching tip (with retry)
         if (tipText.length > 0) {
-          log("Tip", `  Sending coach tip for match ${row.id}: ${tipText.length} chars`);
           if (tipText.length <= STEAM_MAX) {
-            await sendSteamMessage(steamId, tipText);
-            await sleep(2000);
+            await sendSteamMessageWithRetry(steamId, tipText);
+            await sleep(1000);
           } else {
-            // Split on double-newlines (section breaks) to keep sections intact
             const sections = tipText.split(/\n\n/);
             let chunk = "";
-            let chunkNum = 0;
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
-                chunkNum++;
-                log("Tip", `  Sending chunk ${chunkNum} (${chunk.length} chars)...`);
-                await sendSteamMessage(steamId, chunk.trim());
-                await sleep(2000);
+                await sendSteamMessageWithRetry(steamId, chunk.trim());
+                await sleep(1000);
                 chunk = "";
               }
               chunk += (chunk ? "\n\n" : "") + section;
             }
             if (chunk.trim()) {
-              chunkNum++;
-              log("Tip", `  Sending chunk ${chunkNum} (${chunk.length} chars)...`);
-              await sendSteamMessage(steamId, chunk.trim());
-              await sleep(2000);
+              await sendSteamMessageWithRetry(steamId, chunk.trim());
+              await sleep(1000);
             }
           }
-        } else {
-          log("Tip", `  WARNING: coach_tip is empty for match ${row.id}`);
         }
 
-        // 3) Send match stats link as the last message
-        const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
-        const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
-        log("Tip", `  Sending match link for match ${row.id}...`);
-        await sendSteamMessage(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+        // 2) Stats card image
+        if (row.tip_image_url) {
+          await sendSteamMessageWithRetry(steamId, row.tip_image_url);
+          await sleep(1000);
+        }
+
+        // 3) Dashboard link
+        await sendSteamMessageWithRetry(steamId, `📊 View your full match stats here:\n${matchUrl}`);
 
         await markTipSent(row.id);
         currentClaimedId = null;
         sent++;
-        failures = 0;  // reset consecutive-failure counter
-        log("Tip", `✓ Sent coach tip for match ${row.id} — ${tipText.length} chars (${sent} this cycle).`);
+        failures = 0;
+        log("Tip", `✓ Match ${row.id} delivered (${tipText.length} chars, ${sent} this cycle).`);
       } catch (error) {
-        console.warn(`[Tip] Failed to send tip for match ${row.id} to ${steamId}:`, error?.message || error);
+        console.warn(`[Tip] Failed match ${row.id} → ${steamId}:`, error?.message || error);
         skippedIds.add(row.id);
         await revertTipClaim(row.id).catch(e => log("Tip", `revertTipClaim error: ${e.message}`));
         currentClaimedId = null;
         failures++;
         if (failures >= MAX_FAILURES_PER_CYCLE) {
-          log("Tip", `${failures} consecutive send failures — stopping this cycle.`);
+          log("Tip", `${failures} consecutive failures — stopping cycle.`);
           break;
         }
       }
 
-      // Small delay between messages to avoid Steam rate-limiting
-      await sleep(1500);
+      await sleep(1000); // small delay between users to avoid rate-limit
     }
-    log("Tip", `Cycle done: ${sent} tip(s) delivered, ${skippedIds.size} skipped.`);
+    if (sent > 0 || skippedIds.size > 0) {
+      log("Tip", `Cycle done: ${sent} delivered, ${skippedIds.size} skipped.`);
+    }
   } catch (outerErr) {
-    // Safety net: revert any claimed tip that wasn't handled
     log("Tip", `Unexpected error in tip cycle: ${outerErr?.message || outerErr}`);
     if (currentClaimedId) {
-      log("Tip", `Safety-reverting claimed match ${currentClaimedId}`);
       await revertTipClaim(currentClaimedId).catch(e => log("Tip", `Safety revert failed: ${e.message}`));
     }
   } finally {
@@ -736,6 +775,18 @@ const processOneMatch = async (row) => {
 
   const shareCode = row.share_code;
 
+  // ── Dedup: check if another row with the same share_code already has the file ──
+  const existingFile = await findExistingDownload(shareCode, row.id);
+  if (existingFile && fs.existsSync(existingFile)) {
+    await ensureDownloadsDir();
+    const outputFile = path.join(downloadsDir, `match_${row.id}.dem`);
+    await fsp.copyFile(existingFile, outputFile);
+    await markDownloaded(row.id, outputFile);
+    log("DL", `Reused existing file for ${shareCode} → match_${row.id}.dem`);
+    triggerParse(row.id);
+    return;
+  }
+
   // GC request is serialized (Valve limitation) — await in sequence
   const matchList = await requestMatch(shareCode);
   const replayUrl = findReplayUrl(matchList);
@@ -748,10 +799,40 @@ const processOneMatch = async (row) => {
 
   await ensureDownloadsDir();
   const outputFile = path.join(downloadsDir, `match_${row.id}.dem`);
-  await downloadReplay(replayUrl, outputFile);
+
+  // ── Dedup: if same URL is already being downloaded, wait for it ──
+  if (inflightDownloads.has(replayUrl)) {
+    log("DL", `Waiting for in-flight download of same replay...`);
+    try {
+      const srcFile = await inflightDownloads.get(replayUrl);
+      if (srcFile && fs.existsSync(srcFile)) {
+        await fsp.copyFile(srcFile, outputFile);
+        await markDownloaded(row.id, outputFile);
+        log("DL", `Shared download for ${shareCode} → match_${row.id}.dem`);
+        triggerParse(row.id);
+        return;
+      }
+    } catch (_) {
+      // Original download failed — fall through to try our own
+    }
+  }
+
+  // Start download and register in the in-flight map
+  const downloadPromise = (async () => {
+    await downloadReplay(replayUrl, outputFile);
+    return outputFile;
+  })();
+  inflightDownloads.set(replayUrl, downloadPromise);
+
+  try {
+    await downloadPromise;
+  } finally {
+    // Clean up after a short delay (other matches may still be resolving)
+    setTimeout(() => inflightDownloads.delete(replayUrl), 60_000);
+  }
 
   await markDownloaded(row.id, outputFile);
-  log("DL", `Downloaded ${shareCode} → ${outputFile}`);
+  log("DL", `Downloaded ${shareCode} → match_${row.id}.dem`);
 
   // Auto-trigger demo parsing in background (throttled)
   triggerParse(row.id);
@@ -785,13 +866,23 @@ const processPending = async () => {
     activeDownloads += 1;
     processOneMatch(row)
       .catch((error) => {
-        console.error("Replay downloader error:", error);
         const message = typeof error?.message === "string" ? error.message : "";
-        if (message.includes("Replay download failed: 502")) {
+        const causeCode = error?.cause?.code;
+        const isTransient =
+          message.includes("502") ||
+          message.includes("503") ||
+          message.includes("504") ||
+          causeCode === "ETIMEDOUT" ||
+          causeCode === "ECONNRESET" ||
+          message.includes("fetch failed") ||
+          message.includes("ETIMEDOUT");
+
+        if (isTransient) {
           retryAfterByMatchId.set(row.id, Date.now() + RETRY_COOLDOWN_MS);
           markPending(row.id).catch(() => {});
-          log("DL", `Match ${row.id} re-queued (CDN 502).`);
+          log("DL", `Match ${row.id} re-queued (${causeCode || message.slice(0, 40)}).`);
         } else {
+          console.error(`[DL] Match ${row.id} error:`, message);
           markError(row.id).catch(() => {});
         }
       })
@@ -892,8 +983,21 @@ client.on("loggedOn", () => {
 });
 
 client.on("friendRelationship", (steamId, relationship) => {
+  // Auto-accept incoming friend requests
   if (relationship === SteamUser.EFriendRelationship.RequestRecipient) {
     client.addFriend(steamId);
+  }
+  // When someone accepts our request, clear the cooldown so tips deliver immediately
+  if (relationship === SteamUser.EFriendRelationship.Friend) {
+    const sid = typeof steamId.getSteamID64 === "function"
+      ? steamId.getSteamID64()
+      : String(steamId);
+    if (pendingFriendRequests.has(sid)) {
+      pendingFriendRequests.delete(sid);
+      log("Tip", `${sid} accepted friend request — will deliver tips on next cycle.`);
+      // Trigger immediate tip delivery
+      sendPendingMessages().catch(() => {});
+    }
   }
 });
 
