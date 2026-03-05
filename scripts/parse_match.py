@@ -2667,7 +2667,6 @@ def get_ai_coaching_tip(
         language_prompt = (
             "Output the ENTIRE response in Arabic. Very important rules for Arabic output:\n"
             "- Use Modern Standard Arabic or generic dialect.\n"
-            "- Do NOT include any English words or Latin letters.\n"
             "- Use western digits 0-9 for all numbers.\n"
             "- Do NOT use parentheses ( ), slashes / \\ , or colons : inside sentences.\n"
             "- Instead of parentheses, use dashes - or commas , to separate info.\n"
@@ -2675,10 +2674,15 @@ def get_ai_coaching_tip(
             "- Use simple bullet points with - instead of * or other markers.\n"
             "- Place numbers after Arabic words: 'نسبة الفوز 71.4%'.\n"
             "- Start the message with a right-to-left mark.\n"
-            "- Translate map names: de_dust2 = دست 2, de_nuke = نوك, de_ancient = انشنت, "
-            "de_mirage = ميراج, de_inferno = انفيرنو, de_anubis = انوبيس, de_vertigo = فيرتيجو.\n"
             "- Keep section headers short and clear.\n"
-            "- Use emojis to mark each section header."
+            "- Use emojis to mark each section header.\n"
+            "- IMPORTANT: Keep these game terms in English (Latin letters), do NOT translate them:\n"
+            "  - Map names: Dust2, Mirage, Inferno, Nuke, Ancient, Anubis, Vertigo, Overpass, Train, etc.\n"
+            "  - Location callouts: A site, B site, mid, connector, palace, apartments, banana, ramp, heaven, etc.\n"
+            "  - Player names: always keep player/Steam names exactly as they are.\n"
+            "  - Weapon names: AK-47, M4A4, M4A1-S, AWP, Deagle, USP-S, Glock, etc.\n"
+            "  - Utility names: smoke, flash, molotov, HE grenade, etc.\n"
+            "  - CS2 terms: eco, force buy, save, clutch, entry frag, trade kill, rotate, peek, etc."
         )
     else:
         language_prompt = "Output the entire response in English."
