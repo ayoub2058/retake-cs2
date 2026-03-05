@@ -519,7 +519,10 @@ const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
         tip.user_id,
         tip.coach_tip,
         tip.tip_image_url,
-        coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id
+        coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id,
+        coalesce(u.bot_send_card, true)  as bot_send_card,
+        coalesce(u.bot_send_tip, true)   as bot_send_tip,
+        coalesce(u.bot_send_link, true)  as bot_send_link
       from tip
       left join public.users u on u.steam_id::text = tip.user_id::text
       `,
@@ -693,18 +696,22 @@ const sendPendingMessages = async () => {
           continue;
         }
 
-        // ── Send messages: coach tip FIRST (most important), then image, then link ──
+        // ── Send messages based on user preferences ──
         const STEAM_MAX = 4500;
         const tipText = (row.coach_tip || "").trim();
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
+        const wantCard = row.bot_send_card !== false;
+        const wantTip  = row.bot_send_tip !== false;
+        const wantLink = row.bot_send_link !== false;
+
+        let anythingSent = false;
 
         // 1) AI coaching tip (with retry) — the most important message
-        let tipSentOk = false;
-        if (tipText.length > 0) {
+        if (wantTip && tipText.length > 0) {
           if (tipText.length <= STEAM_MAX) {
             await sendSteamMessageWithRetry(steamId, tipText);
-            tipSentOk = true;
+            anythingSent = true;
             await sleep(1000);
           } else {
             const sections = tipText.split(/\n\n/);
@@ -712,7 +719,7 @@ const sendPendingMessages = async () => {
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
                 await sendSteamMessageWithRetry(steamId, chunk.trim());
-                tipSentOk = true;
+                anythingSent = true;
                 await sleep(1000);
                 chunk = "";
               }
@@ -720,42 +727,46 @@ const sendPendingMessages = async () => {
             }
             if (chunk.trim()) {
               await sendSteamMessageWithRetry(steamId, chunk.trim());
-              tipSentOk = true;
+              anythingSent = true;
               await sleep(1000);
             }
           }
         }
 
-        // Mark as notified IMMEDIATELY after coach tip succeeds.
-        // This prevents duplicates: if image/link fails, we don't re-send the tip.
-        if (tipSentOk) {
-          await markTipSent(row.id);
-          currentClaimedId = null; // no revert needed from here
-        }
-
-        // 2) Stats card image (best-effort — don't re-send tip if this fails)
-        try {
-          if (row.tip_image_url) {
-            await sendSteamMessageWithRetry(steamId, row.tip_image_url);
-            await sleep(1000);
-          }
-        } catch (imgErr) {
-          log("Tip", `  Image send failed for match ${row.id}: ${imgErr.message} (tip already delivered)`);
-        }
-
-        // 3) Dashboard link (best-effort)
-        try {
-          await sendSteamMessageWithRetry(steamId, `📊 View your full match stats here:\n${matchUrl}`);
-        } catch (linkErr) {
-          log("Tip", `  Link send failed for match ${row.id}: ${linkErr.message} (tip already delivered)`);
-        }
-
-        // If tip text was empty but we got here, still mark sent to avoid infinite loop
-        if (!tipSentOk) {
-          log("Tip", `  WARNING: coach_tip was empty after trim for match ${row.id} — marking notified.`);
+        // Mark as notified after coach tip succeeds (prevents duplicate re-sends)
+        if (anythingSent) {
           await markTipSent(row.id);
           currentClaimedId = null;
         }
+
+        // 2) Stats card image (best-effort — don't re-send tip if this fails)
+        if (wantCard && row.tip_image_url) {
+          try {
+            await sendSteamMessageWithRetry(steamId, row.tip_image_url);
+            anythingSent = true;
+            await sleep(1000);
+          } catch (imgErr) {
+            log("Tip", `  Image send failed for match ${row.id}: ${imgErr.message}`);
+          }
+        }
+
+        // 3) Dashboard link (best-effort)
+        if (wantLink) {
+          try {
+            await sendSteamMessageWithRetry(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+            anythingSent = true;
+          } catch (linkErr) {
+            log("Tip", `  Link send failed for match ${row.id}: ${linkErr.message}`);
+          }
+        }
+
+        // If nothing was sent (all prefs off, or tip was empty), still mark notified
+        if (!anythingSent) {
+          log("Tip", `  No messages to send for match ${row.id} (user prefs: card=${wantCard}, tip=${wantTip}, link=${wantLink}).`);
+        }
+        // Ensure marked as notified even if only card/link were sent
+        await markTipSent(row.id);
+        currentClaimedId = null;
 
         sent++;
         failures = 0;
