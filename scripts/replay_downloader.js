@@ -506,7 +506,7 @@ const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
         from public.matches_to_download
         where status in ('processed', 'parsed')
           and coach_tip is not null
-          and length(coach_tip) > 0
+          and length(trim(coach_tip)) > 0
           and (tip_sent is null or tip_sent = false)
           and id != ALL($1::int[])
           and user_id::text != ALL($2::text[])
@@ -530,10 +530,10 @@ const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
       return null;
     }
     const row = result.rows[0];
-    // Mark claimed immediately so no other process picks it up
+    // Mark claimed with timestamp so recovery knows when it was claimed
     await db.query(
       `update public.matches_to_download
-       set tip_sent = true
+       set tip_sent = true, tip_claimed_at = now()
        where id = $1`,
       [row.id]
     );
@@ -577,13 +577,15 @@ const revertTipClaim = async (matchId) => {
 const STUCK_TIP_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const recoverStuckTips = async () => {
   try {
+    // Only recover tips that were claimed (tip_claimed_at) more than 5 minutes ago.
+    // Falls back to created_at for rows without tip_claimed_at (legacy rows).
     const result = await pool.query(
       `UPDATE public.matches_to_download
-       SET tip_sent = false
+       SET tip_sent = false, tip_claimed_at = null
        WHERE status IN ('processed', 'parsed')
          AND tip_sent = true
          AND coach_tip IS NOT NULL
-         AND created_at < NOW() - INTERVAL '5 minutes'
+         AND coalesce(tip_claimed_at, created_at) < NOW() - INTERVAL '5 minutes'
        RETURNING id`
     );
     if (result.rowCount > 0) {
@@ -622,7 +624,7 @@ const sendPendingMessages = async () => {
       `SELECT COUNT(*) as cnt FROM public.matches_to_download
        WHERE status IN ('processed', 'parsed')
          AND coach_tip IS NOT NULL
-         AND length(coach_tip) > 0
+         AND length(trim(coach_tip)) > 0
          AND (tip_sent IS NULL OR tip_sent = false)`
     );
     pendingCount = parseInt(pendingCheck.rows[0]?.cnt || "0", 10);
@@ -697,10 +699,12 @@ const sendPendingMessages = async () => {
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
 
-        // 1) AI coaching tip (with retry)
+        // 1) AI coaching tip (with retry) — the most important message
+        let tipSentOk = false;
         if (tipText.length > 0) {
           if (tipText.length <= STEAM_MAX) {
             await sendSteamMessageWithRetry(steamId, tipText);
+            tipSentOk = true;
             await sleep(1000);
           } else {
             const sections = tipText.split(/\n\n/);
@@ -708,6 +712,7 @@ const sendPendingMessages = async () => {
             for (const section of sections) {
               if (chunk.length + section.length + 2 > STEAM_MAX && chunk.length > 0) {
                 await sendSteamMessageWithRetry(steamId, chunk.trim());
+                tipSentOk = true;
                 await sleep(1000);
                 chunk = "";
               }
@@ -715,22 +720,43 @@ const sendPendingMessages = async () => {
             }
             if (chunk.trim()) {
               await sendSteamMessageWithRetry(steamId, chunk.trim());
+              tipSentOk = true;
               await sleep(1000);
             }
           }
         }
 
-        // 2) Stats card image
-        if (row.tip_image_url) {
-          await sendSteamMessageWithRetry(steamId, row.tip_image_url);
-          await sleep(1000);
+        // Mark as notified IMMEDIATELY after coach tip succeeds.
+        // This prevents duplicates: if image/link fails, we don't re-send the tip.
+        if (tipSentOk) {
+          await markTipSent(row.id);
+          currentClaimedId = null; // no revert needed from here
         }
 
-        // 3) Dashboard link
-        await sendSteamMessageWithRetry(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+        // 2) Stats card image (best-effort — don't re-send tip if this fails)
+        try {
+          if (row.tip_image_url) {
+            await sendSteamMessageWithRetry(steamId, row.tip_image_url);
+            await sleep(1000);
+          }
+        } catch (imgErr) {
+          log("Tip", `  Image send failed for match ${row.id}: ${imgErr.message} (tip already delivered)`);
+        }
 
-        await markTipSent(row.id);
-        currentClaimedId = null;
+        // 3) Dashboard link (best-effort)
+        try {
+          await sendSteamMessageWithRetry(steamId, `📊 View your full match stats here:\n${matchUrl}`);
+        } catch (linkErr) {
+          log("Tip", `  Link send failed for match ${row.id}: ${linkErr.message} (tip already delivered)`);
+        }
+
+        // If tip text was empty but we got here, still mark sent to avoid infinite loop
+        if (!tipSentOk) {
+          log("Tip", `  WARNING: coach_tip was empty after trim for match ${row.id} — marking notified.`);
+          await markTipSent(row.id);
+          currentClaimedId = null;
+        }
+
         sent++;
         failures = 0;
         log("Tip", `✓ Match ${row.id} delivered (${tipText.length} chars, ${sent} this cycle).`);
