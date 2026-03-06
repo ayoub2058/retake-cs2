@@ -938,3 +938,248 @@ def generate_stats_image(stats: Dict[str, Any], match_id: Optional[int] = None) 
         import traceback
         traceback.print_exc()
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Arabic Coaching Tip Image Generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_arabic_tip_html(tip_text: str, map_name: Optional[str] = None, result: Optional[str] = None) -> str:
+    """Build HTML for rendering an Arabic coaching tip as a beautiful image."""
+    
+    # Clean up display values
+    display_map = map_name or "Unknown"
+    if display_map.startswith("de_"):
+        display_map = display_map[3:].capitalize()
+    display_result = result or ""
+    
+    # Process the tip text: convert plain text to structured HTML
+    # Split by emoji headers to detect sections
+    import re
+    
+    # Escape HTML entities
+    def escape_html(text: str) -> str:
+        return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;"))
+    
+    # Process sections
+    lines = tip_text.strip().split('\n')
+    html_content = []
+    current_section = []
+    
+    # Emoji pattern for section headers
+    emoji_header_pattern = re.compile(r'^[\u200F\u200E]?\s*([\U0001F300-\U0001F9FF]|[\u2600-\u26FF])')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            if current_section:
+                html_content.append('<div class="paragraph">' + '<br>'.join(current_section) + '</div>')
+                current_section = []
+            continue
+        
+        # Check if line starts with an emoji (section header)
+        if emoji_header_pattern.match(line):
+            if current_section:
+                html_content.append('<div class="paragraph">' + '<br>'.join(current_section) + '</div>')
+                current_section = []
+            html_content.append(f'<div class="section">{escape_html(line)}</div>')
+        else:
+            current_section.append(escape_html(line))
+    
+    if current_section:
+        html_content.append('<div class="paragraph">' + '<br>'.join(current_section) + '</div>')
+    
+    content_html = '\n'.join(html_content)
+    
+    return f'''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Arabic:wght@400;600;700&display=swap');
+    
+    * {{
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }}
+    
+    body {{
+      font-family: 'Noto Sans Arabic', 'Segoe UI', Tahoma, sans-serif;
+      background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+      color: #e4e4e7;
+      padding: 32px;
+      width: 800px;
+      direction: rtl;
+      line-height: 1.9;
+    }}
+    
+    .card {{
+      background: rgba(30, 30, 60, 0.95);
+      border-radius: 16px;
+      padding: 28px;
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }}
+    
+    .header {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid rgba(139, 92, 246, 0.4);
+    }}
+    
+    .logo {{
+      width: 48px;
+      height: 48px;
+      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+    }}
+    
+    .title {{
+      font-size: 22px;
+      font-weight: 700;
+      background: linear-gradient(90deg, #8b5cf6, #c4b5fd);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }}
+    
+    .subtitle {{
+      font-size: 13px;
+      color: #a1a1aa;
+      margin-top: 4px;
+    }}
+    
+    .content {{
+      font-size: 15px;
+    }}
+    
+    .section {{
+      margin: 20px 0 12px 0;
+      padding: 12px 16px;
+      background: rgba(139, 92, 246, 0.12);
+      border-radius: 8px;
+      border-right: 4px solid #8b5cf6;
+      font-weight: 600;
+      font-size: 17px;
+      color: #c4b5fd;
+    }}
+    
+    .paragraph {{
+      margin-bottom: 14px;
+      padding: 0 8px;
+      color: #d4d4d8;
+    }}
+    
+    .footer {{
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(139, 92, 246, 0.2);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #71717a;
+      font-size: 12px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="logo">🎮</div>
+      <div>
+        <div class="title">RetakeAI - تحليل المباراة</div>
+        <div class="subtitle">نصائح تكتيكية مخصصة لك</div>
+      </div>
+    </div>
+    <div class="content">
+      {content_html}
+    </div>
+    <div class="footer">
+      <span>RetakeAI Coach</span>
+      <span>{display_map}{" • " + display_result if display_result else ""}</span>
+    </div>
+  </div>
+</body>
+</html>'''
+
+
+async def _screenshot_arabic_tip(html: str, output_path: str) -> None:
+    """Use playwright to take a screenshot of the Arabic tip HTML."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": 800, "height": 100})
+        await page.set_content(html, wait_until="networkidle")
+        # Wait for fonts to load
+        await page.wait_for_timeout(800)
+        # Screenshot the card element
+        card = page.locator(".card")
+        await card.screenshot(path=output_path, type="png")
+        await browser.close()
+
+
+def generate_arabic_tip_image(
+    tip_text: str,
+    match_id: Optional[int] = None,
+    map_name: Optional[str] = None,
+    result: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Generate an Arabic coaching tip as a beautiful image and upload to Supabase Storage.
+    Returns the public URL or None on failure.
+    """
+    if not tip_text or not tip_text.strip():
+        return None
+    
+    try:
+        html = _build_arabic_tip_html(tip_text, map_name, result)
+
+        # Write to temp file and screenshot
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            png_path = tmp.name
+
+        # Run playwright screenshot
+        asyncio.run(_screenshot_arabic_tip(html, png_path))
+
+        # Read the image bytes
+        with open(png_path, "rb") as f:
+            image_bytes = f.read()
+
+        # Clean up temp file
+        try:
+            os.unlink(png_path)
+        except OSError:
+            pass
+
+        if not image_bytes:
+            print("Arabic tip screenshot produced empty image")
+            return None
+
+        # Upload to Supabase Storage (use same bucket as stats cards)
+        filename = f"tip_ar_{match_id}_{int(datetime.now().timestamp())}.png"
+        public_url = _upload_to_supabase(image_bytes, filename)
+
+        if public_url:
+            print(f"Arabic tip image uploaded: {public_url}")
+        else:
+            print("Arabic tip upload failed — Supabase Storage unavailable")
+
+        return public_url
+
+    except Exception as exc:
+        print(f"Arabic tip image generation failed: {exc}")
+        import traceback
+        traceback.print_exc()
+        return None

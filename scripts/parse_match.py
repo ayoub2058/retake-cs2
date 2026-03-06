@@ -32,11 +32,14 @@ if os.path.exists(_stats_card_path):
     try:
         _spec.loader.exec_module(_mod)
         generate_stats_image = _mod.generate_stats_image
+        generate_arabic_tip_image = _mod.generate_arabic_tip_image
     except Exception as _e:
         print(f"Warning: could not load stats_card module: {_e}")
         generate_stats_image = None
+        generate_arabic_tip_image = None
 else:
     generate_stats_image = None
+    generate_arabic_tip_image = None
 
 load_dotenv(".env.local")
 load_dotenv()
@@ -114,17 +117,19 @@ def mark_parsed(
     match_id: int,
     tip: str,
     tip_image_url: Optional[str] = None,
+    tip_text_image_url: Optional[str] = None,
 ) -> None:
     cursor.execute(
         """
         update public.matches_to_download
         set coach_tip = %s,
             tip_image_url = %s,
+            tip_text_image_url = %s,
             tip_sent = false,
             status = 'processed'
         where id = %s
         """,
-        (tip, tip_image_url, match_id),
+        (tip, tip_image_url, tip_text_image_url, match_id),
     )
 
 
@@ -2621,45 +2626,51 @@ def get_ai_coaching_tip(
         style_prompt = "Give advice in 1-2 sentences maximum. Be direct."
     else:
         style_prompt = (
-            "IMPORTANT: The player has ALREADY received a visual stats card with all their numbers "
-            "(K/D, ADR, HS%, scoreboard, round timeline, death analysis). "
-            "Do NOT repeat or recite any stats. Do NOT create a stats summary. "
-            "Your ONLY job is to provide CLEAR, ACTIONABLE COACHING that any player can understand.\n\n"
-            "READABILITY RULES (follow these strictly):\n"
-            "- Write in plain, conversational English — like a friend who's a good coach explaining things simply.\n"
-            "- NEVER use abbreviations like 'R11', 'HS', 'u.' — always write 'Round 11', 'headshot', etc.\n"
-            "- NEVER mention distances in 'units' or 'u' — instead say 'close range', 'medium range', or 'long range'.\n"
-            "- NEVER write cryptic shorthand — every sentence should be understandable to a casual player.\n"
-            "- Use short paragraphs (2-3 sentences max per paragraph).\n"
-            "- Put a blank line between every paragraph for breathing room.\n"
-            "- Use simple emoji headers to separate sections: 🗺️ 💀 🎯 🧨 📋\n"
-            "- When talking about a round, say it naturally: 'In Round 11, you pushed B site with a MAC-10 "
-            "but ran into an enemy holding the angle with an AK-47. They killed you with a headshot from "
-            "medium range. The problem was peeking without any utility — try throwing a flash before entering.'\n\n"
-            "STRUCTURE YOUR ANALYSIS LIKE THIS:\n\n"
+            "You are an expert CS2 coach analyzing this player's match. "
+            "DO NOT just say 'use flash' or 'use utility' for every death — that's lazy coaching.\n\n"
+            "ANALYZE THE DATA DEEPLY. Look for PATTERNS:\n"
+            "- If they died to the same player multiple times, why? Were they predictable?\n"
+            "- If they died at the same location often, are they playing a bad angle or getting read?\n"
+            "- If deaths were NOT traded (teammates couldn't help), they were too isolated\n"
+            "- If they had low accuracy rounds, what happened? Were they panicking, whiffing sprays, or taking bad fights?\n"
+            "- If they got flashed before dying, they weren't using cover properly\n"
+            "- Look at their economy rounds — did they die on eco rounds (expected) or on full buy rounds (fixable)?\n\n"
+            "GIVE VARIED, TACTICAL ADVICE based on what you actually see:\n"
+            "Instead of always saying 'use flash', consider:\n"
+            "- POSITIONING: 'You played the same angle three rounds in a row — the enemy started pre-aiming you. Mix up your positions.'\n"
+            "- TRADING: 'You died alone in connector twice. Play closer to a teammate so they can trade if you die.'\n"
+            "- WEAPON CHOICE: 'You had an SMG against their AWPer — next time save for a rifle or avoid that angle entirely.'\n"
+            "- TIMING: 'You pushed with 30 seconds left when you didn't need to. Holding the angle would have been safer.'\n"
+            "- ECONOMY: 'You force-bought every round. Learning when to full save sets up stronger buy rounds.'\n"
+            "- PEEKING: 'You wide-swung into a known AWP angle. Jiggle-peek or use a smoke to cross safely.'\n"
+            "- COMMUNICATION: 'Your teammates rotated late — if you called the push earlier, they could help.'\n"
+            "- AIM HABITS: 'Your bullets landed mostly on body/legs. Pre-aim at head level when holding angles.'\n\n"
+            "STRUCTURE (use these emoji headers):\n\n"
             "🗺️ MATCH STORY\n"
-            "Tell the story of the match in 3-4 easy-to-read sentences. "
-            "Group rounds into phases and explain momentum shifts in plain language.\n\n"
-            "💀 KEY ROUNDS TO LEARN FROM\n"
-            "Pick the 4-6 most important rounds where the player died or made mistakes. "
-            "For EACH round, write a short paragraph explaining:\n"
-            "- What happened (in simple words — where they were, what weapon, what the enemy did)\n"
-            "- What went wrong (no utility? bad position? wrong weapon for the situation?)\n"
-            "- What to do differently next time (specific and actionable)\n"
-            "Write each tip so the player can actually picture the situation in their head.\n\n"
-            "🎯 AIM & ACCURACY\n"
-            "Comment on their overall accuracy in 2-3 sentences. "
-            "If they had rounds where they missed a lot, mention those rounds "
-            "and suggest what to practice (spray control, crosshair placement, etc).\n\n"
-            "🧨 UTILITY & TEAMPLAY\n"
-            "In 2-3 sentences, comment on utility usage. "
-            "Were there rounds where they dry-peeked and died? "
-            "Did they flash enemies or just waste utility?\n\n"
-            "📋 TOP 3 THINGS TO WORK ON\n"
-            "List exactly 3 specific, actionable improvements. "
-            "Each one should reference a real situation from this match and tell them exactly what to do.\n\n"
-            "IMPORTANT: Keep the total response between 2000-3000 characters. "
-            "Quality over quantity — every sentence should teach something."
+            "3-4 sentences telling the match flow. Mention turning points and momentum shifts.\n\n"
+            "💡 BIGGEST PATTERN I NOTICED\n"
+            "Identify ONE major habit or mistake that cost multiple rounds. This is the main learning point.\n\n"
+            "💀 KEY ROUNDS BREAKDOWN\n"
+            "Pick 4-5 deaths. For each:\n"
+            "- Describe what happened (location, weapons, enemy action)\n"
+            "- Diagnose the actual problem (NOT just 'no utility' — be specific)\n"
+            "- Give a concrete alternative action\n\n"
+            "📊 ACCURACY & AIM ANALYSIS\n"
+            "Look at their worst accuracy rounds. What happened? Spraying at long range? Panicking? Missing easy shots?\n"
+            "If their hitgroup distribution shows mostly body/leg hits, tell them to focus on crosshair placement.\n\n"
+            "🤝 TEAM PLAY & TRADES\n"
+            "Check if their deaths were traded. If many deaths were un-traded, they need to play more connected with teammates.\n"
+            "Mention specific rounds where they got traded (good) vs. died alone (bad).\n\n"
+            "📋 THREE THINGS TO FIX\n"
+            "Exactly 3 actionable improvements. Each must reference a real situation from THIS match.\n"
+            "Be specific: 'In round 8, you...' not 'Sometimes you...'\n\n"
+            "WRITING RULES:\n"
+            "- Plain conversational language, like a friend coaching you\n"
+            "- NEVER use abbreviations (R8, HS, u., dmg) — write full words\n"
+            "- NEVER say 'units' for distance — say close/medium/long range\n"
+            "- Short paragraphs with blank lines between them\n"
+            "- Keep total response 2000-3000 characters\n"
+            "- Every sentence should teach something — no filler"
         )
 
     language_prompt = ""
@@ -2714,18 +2725,15 @@ def get_ai_coaching_tip(
                 {
                     "role": "system",
                     "content": (
-                        "You are a friendly, clear-speaking CS2 coach. "
-                        "You explain things simply — like a good friend who happens to be great at the game. "
-                        "The player already has a stats card with all their numbers. "
-                        "You provide tactical coaching: what went wrong, why, and how to fix it. "
-                        "Always reference specific rounds and map areas from the match. "
-                        "NEVER use jargon, abbreviations, or cryptic shorthand. "
-                        "Write 'Round 11' not 'R11'. Write 'headshot' not 'HS'. "
-                        "Write 'close range' not '24.7 units'. "
-                        "Every sentence should be easy to understand for any player. "
-                        "Use short paragraphs with blank lines between them. "
-                        "Keep your total response between 2000-3000 characters. "
-                        "You never include URLs or links."
+                        "You are an expert CS2 coach who gives DEEP tactical analysis, not generic advice. "
+                        "DO NOT give lazy tips like 'use flash before peeking' for every death. "
+                        "Instead, analyze patterns: Why did they die to the same player twice? Why were their deaths not traded? "
+                        "Look at economy rounds, positioning habits, accuracy trends, and teamplay issues. "
+                        "Give VARIED advice: positioning, trading, timing, economy, weapon choice, communication, angle use. "
+                        "Always reference SPECIFIC rounds and map locations from the data. "
+                        "Write like a friend coaching you — plain conversational language. "
+                        "NEVER use abbreviations (R11, HS, dmg, u.) — spell everything out. "
+                        "Keep response 2000-3000 characters. Every sentence must teach something."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -2790,7 +2798,23 @@ def parse_match_logic(
                     except Exception as img_exc:
                         log(f"Stats card generation failed for match {match_id_value}: {img_exc}")
 
-                mark_parsed(cursor, match_id_value, tip, tip_image_url=tip_image_url)
+                # Generate Arabic tip as image for better readability in Steam chat
+                tip_text_image_url = None
+                language_lower = (language or "").strip().lower()
+                if language_lower in {"ar", "arabic", "العربية"} and generate_arabic_tip_image is not None:
+                    try:
+                        map_name = stats.get("map_name")
+                        result = stats.get("winner")
+                        tip_text_image_url = generate_arabic_tip_image(
+                            tip,
+                            match_id=match_id_value,
+                            map_name=map_name,
+                            result=result,
+                        )
+                    except Exception as ar_img_exc:
+                        log(f"Arabic tip image generation failed for match {match_id_value}: {ar_img_exc}")
+
+                mark_parsed(cursor, match_id_value, tip, tip_image_url=tip_image_url, tip_text_image_url=tip_text_image_url)
                 db_conn.commit()
                 return match_id_value, True, None
             except Exception as exc:

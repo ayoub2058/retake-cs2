@@ -502,7 +502,7 @@ const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
     const result = await db.query(
       `
       with tip as (
-        select id, user_id, coach_tip, tip_image_url
+        select id, user_id, coach_tip, tip_image_url, tip_text_image_url
         from public.matches_to_download
         where status in ('processed', 'parsed')
           and coach_tip is not null
@@ -519,6 +519,7 @@ const claimNextTip = async (excludeIds = [], excludeSteamIds = []) => {
         tip.user_id,
         tip.coach_tip,
         tip.tip_image_url,
+        tip.tip_text_image_url,
         coalesce(u.steam_id::text, tip.user_id::text) as user_steam_id,
         coalesce(u.bot_send_card, true)  as bot_send_card,
         coalesce(u.bot_send_tip, true)   as bot_send_tip,
@@ -699,6 +700,7 @@ const sendPendingMessages = async () => {
         // ── Send messages based on user preferences ──
         const STEAM_MAX = 4500;
         const tipText = (row.coach_tip || "").trim();
+        const tipTextImageUrl = row.tip_text_image_url; // Arabic tips rendered as image
         const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "https://retake-cs2.vercel.app";
         const matchUrl = `${baseUrl}/dashboard/matches/${row.id}`;
         const wantCard = row.bot_send_card !== false;
@@ -709,7 +711,14 @@ const sendPendingMessages = async () => {
 
         // 1) AI coaching tip (with retry) — the most important message
         if (wantTip && tipText.length > 0) {
-          if (tipText.length <= STEAM_MAX) {
+          // If Arabic tip image exists, send that instead of raw text
+          if (tipTextImageUrl) {
+            await sendSteamMessageWithRetry(steamId, "🎮 تحليل المباراة من RetakeAI:");
+            await sleep(500);
+            await sendSteamMessageWithRetry(steamId, tipTextImageUrl);
+            anythingSent = true;
+            await sleep(1000);
+          } else if (tipText.length <= STEAM_MAX) {
             await sendSteamMessageWithRetry(steamId, tipText);
             anythingSent = true;
             await sleep(1000);
