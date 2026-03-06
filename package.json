@@ -23,7 +23,6 @@
     "passport": "^0.7.0",
     "passport-steam": "^1.0.18",
     "pg": "^8.18.0",
-    "puppeteer": "^24.9.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "recharts": "^3.7.0",
