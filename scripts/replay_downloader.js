@@ -64,6 +64,11 @@ const pool = new Pool({ connectionString: dbUrl, max: 20 });
 const client = new SteamUser();
 const csgo = new GlobalOffensive(client);
 
+// Supabase Storage config for cleanup
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const STORAGE_BUCKET = "stats-cards";
+
 const downloadsDir = path.join(process.cwd(), "downloads");
 
 let activeDownloads = 0;
@@ -488,6 +493,42 @@ const sendSteamMessageWithRetry = async (steamId, message, maxRetries = 2) => {
 };
 
 /**
+ * Delete an image from Supabase Storage to free space.
+ * Extracts filename from the public URL and deletes it.
+ * Fails silently on error (non-critical cleanup).
+ */
+const deleteSupabaseImage = async (imageUrl) => {
+  if (!imageUrl || !SUPABASE_URL || !SUPABASE_SERVICE_KEY) return;
+
+  try {
+    // URL format: {SUPABASE_URL}/storage/v1/object/public/{bucket}/{filename}
+    const publicPath = `/storage/v1/object/public/${STORAGE_BUCKET}/`;
+    const idx = imageUrl.indexOf(publicPath);
+    if (idx === -1) return;
+
+    const filename = imageUrl.slice(idx + publicPath.length);
+    if (!filename) return;
+
+    const deleteUrl = `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${filename}`;
+    const resp = await fetch(deleteUrl, {
+      method: "DELETE",
+      headers: {
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+      },
+    });
+
+    if (resp.ok) {
+      log("Tip", `  Deleted image from storage: ${filename}`);
+    } else {
+      // Non-critical, just log
+      log("Tip", `  Image delete failed (${resp.status}): ${filename}`);
+    }
+  } catch (err) {
+    log("Tip", `  Image delete error: ${err.message}`);
+  }
+};
+
+/**
  * Atomically claim ONE pending tip using SELECT ... FOR UPDATE SKIP LOCKED
  * so that concurrent instances / restarts never send the same tip twice.
  * Returns null when there is nothing to send.
@@ -777,6 +818,19 @@ const sendPendingMessages = async () => {
         // Ensure marked as notified even if only card/link were sent
         await markTipSent(row.id);
         currentClaimedId = null;
+
+        // Clean up images from Supabase Storage to save space (free tier limit)
+        if (row.tip_image_url) {
+          deleteSupabaseImage(row.tip_image_url).catch(() => {});
+        }
+        if (tipTextImageUrl) {
+          deleteSupabaseImage(tipTextImageUrl).catch(() => {});
+        }
+        // Clear URLs from DB (optional, saves a few bytes)
+        pool.query(
+          `UPDATE public.matches_to_download SET tip_image_url = NULL, tip_text_image_url = NULL WHERE id = $1`,
+          [row.id]
+        ).catch(() => {});
 
         sent++;
         failures = 0;
