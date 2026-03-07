@@ -749,7 +749,8 @@ const sendPendingMessages = async () => {
         }
 
         // 2) Stats card image (best-effort — don't re-send tip if this fails)
-        if (wantCard && row.tip_image_url) {
+        // Skip if Arabic tip image was sent (user would see 2 similar-looking images)
+        if (wantCard && row.tip_image_url && !tipTextImageUrl) {
           try {
             await sendSteamMessageWithRetry(steamId, row.tip_image_url);
             anythingSent = true;
