@@ -790,8 +790,7 @@ const sendPendingMessages = async () => {
         }
 
         // 2) Stats card image (best-effort — don't re-send tip if this fails)
-        // Skip if Arabic tip image was sent (user would see 2 similar-looking images)
-        if (wantCard && row.tip_image_url && !tipTextImageUrl) {
+        if (wantCard && row.tip_image_url) {
           try {
             await sendSteamMessageWithRetry(steamId, row.tip_image_url);
             anythingSent = true;
@@ -819,18 +818,24 @@ const sendPendingMessages = async () => {
         await markTipSent(row.id);
         currentClaimedId = null;
 
-        // Clean up images from Supabase Storage to save space (free tier limit)
-        if (row.tip_image_url) {
-          deleteSupabaseImage(row.tip_image_url).catch(() => {});
-        }
-        if (tipTextImageUrl) {
-          deleteSupabaseImage(tipTextImageUrl).catch(() => {});
-        }
-        // Clear URLs from DB (optional, saves a few bytes)
-        pool.query(
-          `UPDATE public.matches_to_download SET tip_image_url = NULL, tip_text_image_url = NULL WHERE id = $1`,
-          [row.id]
-        ).catch(() => {});
+        // Clean up images from Supabase Storage after a delay.
+        // Steam needs time to fetch the image for link preview / user to open it.
+        const IMAGE_DELETE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+        const matchIdForCleanup = row.id;
+        const imageUrlForCleanup = row.tip_image_url;
+        const tipTextImageUrlForCleanup = tipTextImageUrl;
+        setTimeout(() => {
+          if (imageUrlForCleanup) {
+            deleteSupabaseImage(imageUrlForCleanup).catch(() => {});
+          }
+          if (tipTextImageUrlForCleanup) {
+            deleteSupabaseImage(tipTextImageUrlForCleanup).catch(() => {});
+          }
+          pool.query(
+            `UPDATE public.matches_to_download SET tip_image_url = NULL, tip_text_image_url = NULL WHERE id = $1`,
+            [matchIdForCleanup]
+          ).catch(() => {});
+        }, IMAGE_DELETE_DELAY_MS);
 
         sent++;
         failures = 0;
