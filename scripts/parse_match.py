@@ -85,6 +85,8 @@ def fetch_matches(
                         left join public.users u
                             on u.steam_id = m.user_id
                         where m.id = %s
+                          and m.coach_tip is null
+                          and m.status not in ('notified', 'error')
             """,
             (match_id,),
         )
@@ -420,6 +422,22 @@ def set_rate_limiter(limiter: Optional[RateLimiter]) -> None:
     _rate_limiter = limiter
 
 
+def _steamid_col_to_str(series: pd.Series) -> pd.Series:
+    """Convert a pandas column of Steam IDs (int64/uint64/float64/str) to canonical string form.
+
+    Handles the case where NaN values cause the column to become float64,
+    which makes .astype(str) produce scientific notation like '7.656e+16'.
+    """
+    def _to_str(val):
+        if pd.isna(val):
+            return ""
+        if isinstance(val, float):
+            return str(int(val))
+        return str(val).strip()
+
+    return series.apply(_to_str)
+
+
 def parse_stats(
     demo_path: str, steam_id: str, match_id: int, player_name: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -520,7 +538,7 @@ def parse_stats(
     if rich_shots_df is not None and not rich_shots_df.empty and "player_steamid" in rich_shots_df.columns:
         try:
             _shots_tmp = rich_shots_df.copy()
-            _shots_tmp["player_steamid"] = _shots_tmp["player_steamid"].astype(str).str.strip()
+            _shots_tmp["player_steamid"] = _steamid_col_to_str(_shots_tmp["player_steamid"])
             # Filter out grenade/knife "shots"
             _weapon_col = "weapon" if "weapon" in _shots_tmp.columns else None
             if _weapon_col:
@@ -533,19 +551,19 @@ def parse_stats(
                 sid = str(row["player_steamid"]).strip()
                 rn = int(row["round_num"])
                 accuracy_per_round.setdefault(rn, {}).setdefault("shots_by_player", {})[sid] = int(row["shots"])
-        except Exception:
-            pass
+        except Exception as _acc_err:
+            print(f"WARNING: accuracy_per_round shots computation failed: {_acc_err}")
     if rich_damages_df is not None and not rich_damages_df.empty and "attacker_steamid" in rich_damages_df.columns:
         try:
             _dmg_tmp = rich_damages_df.copy()
-            _dmg_tmp["attacker_steamid"] = _dmg_tmp["attacker_steamid"].astype(str).str.strip()
+            _dmg_tmp["attacker_steamid"] = _steamid_col_to_str(_dmg_tmp["attacker_steamid"])
             _hits_grouped = _dmg_tmp.groupby(["round_num", "attacker_steamid"]).size().reset_index(name="hits")
             for _, row in _hits_grouped.iterrows():
                 sid = str(row["attacker_steamid"]).strip()
                 rn = int(row["round_num"])
                 accuracy_per_round.setdefault(rn, {}).setdefault("hits_by_player", {})[sid] = int(row["hits"])
-        except Exception:
-            pass
+        except Exception as _dmg_err:
+            print(f"WARNING: accuracy_per_round hits computation failed: {_dmg_err}")
 
     # ── Build per-round damage dealt/taken ──
     # dmg_per_round: round → {dealt: int, taken: int} (for target player, computed later once target_steam_id known)
@@ -560,7 +578,7 @@ def parse_stats(
     if rich_shots_df is not None and not rich_shots_df.empty and "player_place" in rich_shots_df.columns:
         try:
             _shots_tmp2 = rich_shots_df.copy()
-            _shots_tmp2["player_steamid"] = _shots_tmp2["player_steamid"].astype(str).str.strip()
+            _shots_tmp2["player_steamid"] = _steamid_col_to_str(_shots_tmp2["player_steamid"])
             for rn_val in _shots_tmp2["round_num"].unique():
                 _rn_int = int(rn_val)
                 positions_per_round[_rn_int] = {}  # type: ignore  # overwritten below
@@ -574,7 +592,8 @@ def parse_stats(
                 sid = str(row["player_steamid"]).strip()
                 _positions_all.setdefault(rn, {})[sid] = row["places"]
             positions_per_round = _positions_all  # type: ignore
-        except Exception:
+        except Exception as _pos_err:
+            print(f"WARNING: positions_per_round computation failed: {_pos_err}")
             positions_per_round = {}
 
     # ── Build weapon used per round from shots ──
@@ -582,7 +601,7 @@ def parse_stats(
     if rich_shots_df is not None and not rich_shots_df.empty:
         try:
             _shots_tmp3 = rich_shots_df.copy()
-            _shots_tmp3["player_steamid"] = _shots_tmp3["player_steamid"].astype(str).str.strip()
+            _shots_tmp3["player_steamid"] = _steamid_col_to_str(_shots_tmp3["player_steamid"])
             if "weapon" in _shots_tmp3.columns:
                 _shots_tmp3 = _shots_tmp3[~_shots_tmp3["weapon"].str.contains(
                     "grenade|flashbang|smokegrenade|decoy|molotov|incgrenade|knife|bayonet|c4",
@@ -595,7 +614,8 @@ def parse_stats(
                 rn = int(row["round_num"])
                 sid = str(row["player_steamid"]).strip()
                 weapon_per_round.setdefault(rn, {})[sid] = str(row["primary_weapon"]).replace("weapon_", "")
-        except Exception:
+        except Exception as _wpn_err:
+            print(f"WARNING: weapon_per_round computation failed: {_wpn_err}")
             weapon_per_round = {}
 
     # ── Build trade kill data from rich kills ──
@@ -1560,8 +1580,8 @@ def parse_stats(
     if rich_damages_raw is not None and not rich_damages_raw.empty:
         try:
             _dmg_all = rich_damages_raw.copy()
-            _dmg_all["attacker_steamid"] = _dmg_all["attacker_steamid"].astype(str).str.strip()
-            _dmg_all["victim_steamid"] = _dmg_all["victim_steamid"].astype(str).str.strip()
+            _dmg_all["attacker_steamid"] = _steamid_col_to_str(_dmg_all["attacker_steamid"])
+            _dmg_all["victim_steamid"] = _steamid_col_to_str(_dmg_all["victim_steamid"])
             _user_dealt = _dmg_all[_dmg_all["attacker_steamid"] == target_steam_id]
             _user_taken = _dmg_all[_dmg_all["victim_steamid"] == target_steam_id]
             dmg_dealt_per_round = _user_dealt.groupby("round_num")["dmg_health_real"].sum().astype(int).to_dict()
@@ -1569,8 +1589,8 @@ def parse_stats(
             # Hitgroup where this player's bullets land
             if "hitgroup" in _user_dealt.columns:
                 hitgroup_distribution = _user_dealt["hitgroup"].value_counts().to_dict()
-        except Exception:
-            pass
+        except Exception as _dmg_player_err:
+            print(f"WARNING: per-player damage computation failed: {_dmg_player_err}")
 
     # Per-round accuracy for the target
     user_accuracy_per_round: Dict[int, Dict[str, Any]] = {}
@@ -1584,6 +1604,19 @@ def parse_stats(
                 "shots": s, "hits": h,
                 "accuracy": round(h / s * 100, 1)
             }
+
+    # Debug: log if accuracy data is unexpectedly empty
+    if not user_accuracy_per_round and accuracy_per_round:
+        _sample_keys = set()
+        for _rdata in accuracy_per_round.values():
+            _sample_keys.update(_rdata.get("shots_by_player", {}).keys())
+            if len(_sample_keys) >= 5:
+                break
+        print(
+            f"WARNING: accuracy data exists for {len(accuracy_per_round)} rounds but "
+            f"target_steam_id '{target_steam_id}' not found in player keys. "
+            f"Sample keys: {list(_sample_keys)[:5]}"
+        )
 
     # Positions played by target per round
     user_positions_per_round: Dict[int, List[str]] = {}
@@ -1607,8 +1640,8 @@ def parse_stats(
     if rich_kills_df is not None and not rich_kills_df.empty:
         try:
             _tk_df = rich_kills_df.copy()
-            _tk_df["attacker_steamid"] = _tk_df["attacker_steamid"].astype(str).str.strip()
-            _tk_df["victim_steamid"] = _tk_df["victim_steamid"].astype(str).str.strip()
+            _tk_df["attacker_steamid"] = _steamid_col_to_str(_tk_df["attacker_steamid"])
+            _tk_df["victim_steamid"] = _steamid_col_to_str(_tk_df["victim_steamid"])
             # Determine target's side
             _target_side = None
             for _, _trow in _tk_df.iterrows():
@@ -2656,7 +2689,9 @@ def get_ai_coaching_tip(
             "- Diagnose the actual problem (NOT just 'no utility' — be specific)\n"
             "- Give a concrete alternative action\n\n"
             "📊 ACCURACY & AIM ANALYSIS\n"
-            "Look at their worst accuracy rounds. What happened? Spraying at long range? Panicking? Missing easy shots?\n"
+            "ONLY include this section if the data below has an '-- Accuracy Summary --' block with real numbers.\n"
+            "If there is NO accuracy data, skip this section entirely — do NOT guess or fabricate accuracy numbers.\n"
+            "When accuracy data IS available: analyze their worst accuracy rounds, look for patterns like spraying at long range or panicking.\n"
             "If their hitgroup distribution shows mostly body/leg hits, tell them to focus on crosshair placement.\n\n"
             "🤝 TEAM PLAY & TRADES\n"
             "Check if their deaths were traded. If many deaths were un-traded, they need to play more connected with teammates.\n"
