@@ -120,7 +120,8 @@ def mark_parsed(
     tip: str,
     tip_image_url: Optional[str] = None,
     tip_text_image_url: Optional[str] = None,
-) -> None:
+) -> bool:
+    """Write coach tip only if no tip exists yet. Returns True if written."""
     cursor.execute(
         """
         update public.matches_to_download
@@ -130,9 +131,12 @@ def mark_parsed(
             tip_sent = false,
             status = 'processed'
         where id = %s
+          and coach_tip is null
+          and status not in ('notified')
         """,
         (tip, tip_image_url, tip_text_image_url, match_id),
     )
+    return cursor.rowcount > 0
 
 
 def mark_error(cursor: RealDictCursor, match_id: int, reason: str) -> None:
@@ -2849,8 +2853,11 @@ def parse_match_logic(
                     except Exception as ar_img_exc:
                         log(f"Arabic tip image generation failed for match {match_id_value}: {ar_img_exc}")
 
-                mark_parsed(cursor, match_id_value, tip, tip_image_url=tip_image_url, tip_text_image_url=tip_text_image_url)
+                written = mark_parsed(cursor, match_id_value, tip, tip_image_url=tip_image_url, tip_text_image_url=tip_text_image_url)
                 db_conn.commit()
+                if not written:
+                    log(f"Match {match_id_value} already parsed by another process — skipping.")
+                    return match_id_value, True, None
                 return match_id_value, True, None
             except Exception as exc:
                 if is_quota_error(exc):

@@ -1039,6 +1039,11 @@ const drainParseQueue = () => {
 };
 
 const triggerParse = (matchId) => {
+  // Deduplicate: skip if already queued or currently parsing
+  if (parseQueue.includes(matchId)) {
+    log("Parse", `Match ${matchId} already queued — skipping.`);
+    return;
+  }
   parseQueue.push(matchId);
   drainParseQueue();
 };
