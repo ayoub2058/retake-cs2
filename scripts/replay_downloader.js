@@ -819,8 +819,8 @@ const sendPendingMessages = async () => {
         currentClaimedId = null;
 
         // Clean up images from Supabase Storage after a delay.
-        // Steam needs time to fetch the image for link preview / user to open it.
-        const IMAGE_DELETE_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+        // Keep images for 24 hours so Discord/Steam can cache them before deletion.
+        const IMAGE_DELETE_DELAY_MS = 24 * 60 * 60 * 1000; // 24 hours
         const matchIdForCleanup = row.id;
         const imageUrlForCleanup = row.tip_image_url;
         const tipTextImageUrlForCleanup = tipTextImageUrl;
