@@ -1499,6 +1499,14 @@ def parse_stats(
 
                 if a_id == target_steam_id:
                     user_round_kills[rn] = user_round_kills.get(rn, 0) + 1
+                    # Compute side stats from team columns in deaths_df
+                    _a_team_col = find_col(deaths_df_local, ["attacker_team_num", "attackerTeam", "attacker_team", "attacker_side"])
+                    if _a_team_col:
+                        _a_side = normalize_side(drow.get(_a_team_col))
+                        if _a_side == "CT":
+                            ct_kills += 1
+                        elif _a_side == "T":
+                            t_kills += 1
                     # Enrich with positional context from rich parser
                     ctx = kill_context.get((rn, v_id), {})
                     kill_detail: Dict[str, Any] = {
@@ -1520,6 +1528,14 @@ def parse_stats(
                 if v_id == target_steam_id:
                     if rn not in user_round_deaths:
                         user_round_deaths.append(rn)
+                    # Compute side stats from team columns in deaths_df
+                    _v_team_col = find_col(deaths_df_local, ["user_team_num", "victimTeam", "victim_team", "victim_side"])
+                    if _v_team_col:
+                        _v_side = normalize_side(drow.get(_v_team_col))
+                        if _v_side == "CT":
+                            ct_deaths += 1
+                        elif _v_side == "T":
+                            t_deaths += 1
                     # Enrich with positional context from rich parser
                     ctx = kill_context.get((rn, v_id), {})
                     death_detail: Dict[str, Any] = {
@@ -1538,6 +1554,16 @@ def parse_stats(
                     if ctx.get("distance"):
                         death_detail["distance"] = round(ctx["distance"], 1)
                     user_death_details[rn] = death_detail
+
+            # Build multi-kill rounds from fallback data
+            for _rn, _kill_count in user_round_kills.items():
+                if _kill_count >= 3:
+                    _mk_label = {3: "3K", 4: "4K", 5: "ACE"}.get(_kill_count, f"{_kill_count}K")
+                    multi_kill_rounds.append({
+                        "round": _rn,
+                        "kills": _kill_count,
+                        "label": _mk_label,
+                    })
     elif debug_demo and not rounds:
         print(
             "DEBUG: opening duel fallback skipped: "
@@ -1557,7 +1583,7 @@ def parse_stats(
 
     opening_total = opening_kills + opening_deaths
     opening_win_rate = (opening_kills / opening_total * 100) if opening_total else 0.0
-    side_stats_available = bool(rounds)
+    side_stats_available = bool(rounds) or (ct_kills + ct_deaths + t_kills + t_deaths > 0)
     ct_kd = (ct_kills / ct_deaths) if ct_deaths else float(ct_kills)
     t_kd = (t_kills / t_deaths) if t_deaths else float(t_kills)
     if not side_stats_available:
@@ -2234,6 +2260,7 @@ def parse_stats(
         "utility_per_round": utility_per_round,
         "flash_blind_data": flash_blind_data,
         "target_steam_id": target_steam_id,
+        "awpy_target_id": _awpy_target_id,
         "user_accuracy_per_round": user_accuracy_per_round,
         "dmg_dealt_per_round": dmg_dealt_per_round,
         "dmg_taken_per_round": dmg_taken_per_round,
@@ -2294,6 +2321,8 @@ def get_ai_coaching_tip(
     utility_per_round = stats.get("utility_per_round") or {}
     flash_blind_data = stats.get("flash_blind_data") or {}
     target_steam_id_for_tip = str(stats.get("target_steam_id") or "").strip()
+    # awpy_target_id is the Steam ID as it appears in awpy DataFrames (flash, utility, bomb)
+    awpy_target_id = str(stats.get("awpy_target_id") or "").strip() or target_steam_id_for_tip
     user_accuracy_per_round = stats.get("user_accuracy_per_round") or {}
     dmg_dealt_per_round = stats.get("dmg_dealt_per_round") or {}
     dmg_taken_per_round = stats.get("dmg_taken_per_round") or {}
@@ -2451,7 +2480,7 @@ def get_ai_coaching_tip(
                     parts.append("survived, 0 kills")
 
             # Utility usage this round
-            user_util = utility_per_round.get(rn, {}).get(target_steam_id_for_tip, [])
+            user_util = utility_per_round.get(rn, {}).get(awpy_target_id, []) or utility_per_round.get(rn, {}).get(target_steam_id_for_tip, [])
             if user_util:
                 from collections import Counter
                 util_counts = Counter(user_util)
@@ -2460,10 +2489,11 @@ def get_ai_coaching_tip(
 
             # Flash effectiveness this round
             round_blinds = flash_blind_data.get(rn, [])
-            user_flashes_thrown = [b for b in round_blinds if b.get("thrower") == target_steam_id_for_tip]
+            _flash_ids = {awpy_target_id, target_steam_id_for_tip}  # match either format
+            user_flashes_thrown = [b for b in round_blinds if b.get("thrower") in _flash_ids]
             if user_flashes_thrown:
-                enemies_blinded = [b for b in user_flashes_thrown if b.get("blinded") != target_steam_id_for_tip]
-                self_blinded = [b for b in user_flashes_thrown if b.get("blinded") == target_steam_id_for_tip]
+                enemies_blinded = [b for b in user_flashes_thrown if b.get("blinded") not in _flash_ids]
+                self_blinded = [b for b in user_flashes_thrown if b.get("blinded") in _flash_ids]
                 if enemies_blinded:
                     names = set(b.get("blinded_name", "?") for b in enemies_blinded)
                     parts.append(f"flash blinded enemies: {', '.join(names)}")
@@ -2471,8 +2501,8 @@ def get_ai_coaching_tip(
                     parts.append("self-flashed!")
             # Was the user blinded by enemy flash before death?
             user_got_flashed = [b for b in round_blinds
-                                if b.get("blinded") == target_steam_id_for_tip
-                                and b.get("thrower") != target_steam_id_for_tip
+                                if b.get("blinded") in _flash_ids
+                                and b.get("thrower") not in _flash_ids
                                 and b.get("duration", 0) > 0.5]
             if user_got_flashed and rn in user_round_deaths:
                 flash_dur = max(b.get("duration", 0) for b in user_got_flashed)
@@ -2505,7 +2535,7 @@ def get_ai_coaching_tip(
                 be_player = be.get("player", "?")
                 be_event = be.get("event", "?")
                 be_site = be.get("bombsite", "?")
-                is_target = be.get("player_steamid") == target_steam_id_for_tip
+                is_target = be.get("player_steamid") in {awpy_target_id, target_steam_id_for_tip}
                 if is_target:
                     parts.append(f"YOU {be_event} bomb at {be_site}")
                 else:
@@ -2769,7 +2799,8 @@ def get_ai_coaching_tip(
             "- NEVER say 'units' for distance — say close/medium/long range\n"
             "- Short paragraphs with blank lines between them\n"
             "- Keep total response 2000-3000 characters\n"
-            "- Every sentence should teach something — no filler"
+            "- Every sentence should teach something — no filler\n"
+            "- ONLY mention the player was flashed/blinded in a round if the round data explicitly says 'was flashed by enemy'. Do NOT assume or fabricate flash events."
         )
 
     language_prompt = ""

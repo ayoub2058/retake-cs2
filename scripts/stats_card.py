@@ -338,7 +338,12 @@ def build_stats_card_html(stats: Dict[str, Any], match_id: Optional[int] = None)
 
     map_class = _get_map_image_class(map_name)
     death_time_display = f"{avg_death_time}s" if avg_death_time is not None else "N/A"
-    death_dist_display = f"{avg_death_dist}u" if avg_death_dist is not None else "N/A"
+    if avg_death_dist is not None:
+        # Convert Source engine units to meters (1 unit ≈ 0.01905m)
+        dist_meters = round(avg_death_dist * 0.01905, 1)
+        death_dist_display = f"{dist_meters}m"
+    else:
+        death_dist_display = "N/A"
 
     # Count rounds survived vs died
     total_rounds = len(rounds_history)
