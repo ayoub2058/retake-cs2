@@ -1577,6 +1577,37 @@ def parse_stats(
     fav_weapon = max(weapon_counts, key=weapon_counts.get) if weapon_counts else None
 
     # ── Target-player-specific rich data (needs target_steam_id) ──
+    # Resolve the target player's ID as it appears in awpy DataFrames.
+    # awpy may store Steam IDs in a format that differs from demoparser2.
+    _awpy_target_id = target_steam_id
+    if rich_damages_raw is not None and not rich_damages_raw.empty and target_steam_id:
+        try:
+            _probe = rich_damages_raw.copy()
+            _probe["attacker_steamid"] = _steamid_col_to_str(_probe["attacker_steamid"])
+            _awpy_ids = set(_probe["attacker_steamid"].unique())
+            if "victim_steamid" in _probe.columns:
+                _probe["victim_steamid"] = _steamid_col_to_str(_probe["victim_steamid"])
+                _awpy_ids.update(_probe["victim_steamid"].unique())
+            if target_steam_id not in _awpy_ids:
+                _target_digits = "".join(c for c in target_steam_id if c.isdigit())
+                for _k in _awpy_ids:
+                    _k_digits = "".join(c for c in str(_k) if c.isdigit())
+                    if _k_digits == _target_digits:
+                        _awpy_target_id = _k
+                        print(f"Awpy damage ID resolved: '{target_steam_id}' -> '{_k}'")
+                        break
+                else:
+                    if len(_target_digits) >= 10:
+                        _suffix = _target_digits[-10:]
+                        for _k in _awpy_ids:
+                            _k_digits = "".join(c for c in str(_k) if c.isdigit())
+                            if _k_digits.endswith(_suffix):
+                                _awpy_target_id = _k
+                                print(f"Awpy damage ID resolved (suffix): '{target_steam_id}' -> '{_k}'")
+                                break
+        except Exception:
+            pass
+
     # Per-round damage dealt/taken
     dmg_dealt_per_round: Dict[int, int] = {}
     dmg_taken_per_round: Dict[int, int] = {}
@@ -1586,8 +1617,8 @@ def parse_stats(
             _dmg_all = rich_damages_raw.copy()
             _dmg_all["attacker_steamid"] = _steamid_col_to_str(_dmg_all["attacker_steamid"])
             _dmg_all["victim_steamid"] = _steamid_col_to_str(_dmg_all["victim_steamid"])
-            _user_dealt = _dmg_all[_dmg_all["attacker_steamid"] == target_steam_id]
-            _user_taken = _dmg_all[_dmg_all["victim_steamid"] == target_steam_id]
+            _user_dealt = _dmg_all[_dmg_all["attacker_steamid"] == _awpy_target_id]
+            _user_taken = _dmg_all[_dmg_all["victim_steamid"] == _awpy_target_id]
             dmg_dealt_per_round = _user_dealt.groupby("round_num")["dmg_health_real"].sum().astype(int).to_dict()
             dmg_taken_per_round = _user_taken.groupby("round_num")["dmg_health_real"].sum().astype(int).to_dict()
             # Hitgroup where this player's bullets land
@@ -1597,37 +1628,63 @@ def parse_stats(
             print(f"WARNING: per-player damage computation failed: {_dmg_player_err}")
 
     # Per-round accuracy for the target
+    # First, resolve which key in the shots data matches our target player.
+    # The awpy rich parser may store Steam IDs in a different string format than
+    # demoparser2 (e.g. with/without leading zeros, different int widths), so we
+    # try an exact match first and fall back to suffix / digits-only matching.
+    _acc_resolved_id = target_steam_id
+    if accuracy_per_round and target_steam_id:
+        _all_shot_keys: set = set()
+        for _rdata in accuracy_per_round.values():
+            _all_shot_keys.update(_rdata.get("shots_by_player", {}).keys())
+        if target_steam_id not in _all_shot_keys:
+            # Try to find a matching key by comparing only digits
+            _target_digits = "".join(c for c in target_steam_id if c.isdigit())
+            _matched_key = None
+            for _k in _all_shot_keys:
+                _k_digits = "".join(c for c in _k if c.isdigit())
+                if _k_digits == _target_digits:
+                    _matched_key = _k
+                    break
+            # Fallback: suffix match (last 10 digits)
+            if not _matched_key and len(_target_digits) >= 10:
+                _suffix = _target_digits[-10:]
+                for _k in _all_shot_keys:
+                    _k_digits = "".join(c for c in _k if c.isdigit())
+                    if _k_digits.endswith(_suffix):
+                        _matched_key = _k
+                        break
+            if _matched_key:
+                print(
+                    f"Accuracy ID resolved: target '{target_steam_id}' matched to "
+                    f"shots key '{_matched_key}'"
+                )
+                _acc_resolved_id = _matched_key
+            else:
+                print(
+                    f"WARNING: accuracy data exists for {len(accuracy_per_round)} rounds but "
+                    f"target_steam_id '{target_steam_id}' not found in player keys. "
+                    f"Sample keys: {list(_all_shot_keys)[:5]}"
+                )
+
     user_accuracy_per_round: Dict[int, Dict[str, Any]] = {}
     for rn, rdata in accuracy_per_round.items():
         shots_by = rdata.get("shots_by_player", {})
         hits_by = rdata.get("hits_by_player", {})
-        s = shots_by.get(target_steam_id, 0)
-        h = hits_by.get(target_steam_id, 0)
+        s = shots_by.get(_acc_resolved_id, 0)
+        h = hits_by.get(_acc_resolved_id, 0)
         if s > 0:
             user_accuracy_per_round[rn] = {
                 "shots": s, "hits": h,
                 "accuracy": round(h / s * 100, 1)
             }
 
-    # Debug: log if accuracy data is unexpectedly empty
-    if not user_accuracy_per_round and accuracy_per_round:
-        _sample_keys = set()
-        for _rdata in accuracy_per_round.values():
-            _sample_keys.update(_rdata.get("shots_by_player", {}).keys())
-            if len(_sample_keys) >= 5:
-                break
-        print(
-            f"WARNING: accuracy data exists for {len(accuracy_per_round)} rounds but "
-            f"target_steam_id '{target_steam_id}' not found in player keys. "
-            f"Sample keys: {list(_sample_keys)[:5]}"
-        )
-
     # Positions played by target per round
     user_positions_per_round: Dict[int, List[str]] = {}
     if isinstance(positions_per_round, dict):
         for rn, player_positions in positions_per_round.items():
             if isinstance(player_positions, dict):
-                user_pos = player_positions.get(target_steam_id, [])
+                user_pos = player_positions.get(_acc_resolved_id) or player_positions.get(target_steam_id, [])
                 if user_pos:
                     user_positions_per_round[int(rn)] = user_pos
 
@@ -1635,7 +1692,7 @@ def parse_stats(
     user_weapon_per_round: Dict[int, str] = {}
     for rn, player_weapons in weapon_per_round.items():
         if isinstance(player_weapons, dict):
-            user_wpn = player_weapons.get(target_steam_id)
+            user_wpn = player_weapons.get(_acc_resolved_id) or player_weapons.get(target_steam_id)
             if user_wpn:
                 user_weapon_per_round[int(rn)] = user_wpn
 
@@ -2517,6 +2574,9 @@ def get_ai_coaching_tip(
     if user_accuracy_per_round:
         stats_lines.append("")
         stats_lines.append("-- Accuracy Summary --")
+    else:
+        stats_lines.append("")
+        stats_lines.append("-- Accuracy Summary: NO DATA AVAILABLE (do NOT guess or mention accuracy) --")
         total_shots = sum(v.get("shots", 0) for v in user_accuracy_per_round.values())
         total_hits = sum(v.get("hits", 0) for v in user_accuracy_per_round.values())
         overall_acc = round(total_hits / total_shots * 100, 1) if total_shots else 0
@@ -2693,8 +2753,8 @@ def get_ai_coaching_tip(
             "- Diagnose the actual problem (NOT just 'no utility' — be specific)\n"
             "- Give a concrete alternative action\n\n"
             "📊 ACCURACY & AIM ANALYSIS\n"
-            "ONLY include this section if the data below has an '-- Accuracy Summary --' block with real numbers.\n"
-            "If there is NO accuracy data, skip this section entirely — do NOT guess or fabricate accuracy numbers.\n"
+            "ONLY include this section if the data below has an '-- Accuracy Summary --' block with REAL shot/hit numbers.\n"
+            "If the accuracy section says 'NO DATA AVAILABLE', you MUST skip this section entirely — do NOT write about accuracy at all, do NOT say 0%, do NOT guess or fabricate accuracy numbers.\n"
             "When accuracy data IS available: analyze their worst accuracy rounds, look for patterns like spraying at long range or panicking.\n"
             "If their hitgroup distribution shows mostly body/leg hits, tell them to focus on crosshair placement.\n\n"
             "🤝 TEAM PLAY & TRADES\n"
