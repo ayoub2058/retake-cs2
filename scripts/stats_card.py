@@ -296,19 +296,16 @@ def build_stats_card_html(stats: Dict[str, Any], match_id: Optional[int] = None)
             user_score = score_t
             enemy_score = score_ct
 
-    # Find the user in player stats
-    target_steam_id = ""
+    # Find the user in player stats using pre-computed target_steam_id
+    target_steam_id = str(stats.get("target_steam_id") or "").strip()
     user_player = None
-    for p in players_stats:
-        if p.get("team_side") == user_team_side:
-            if user_player is None or p.get("adr", 0) == adr:
-                # Match by ADR to find the user
-                if abs(p.get("adr", 0) - adr) < 0.2:
-                    user_player = p
-                    target_steam_id = str(p.get("steam_id", ""))
-                    break
+    if target_steam_id:
+        for p in players_stats:
+            if str(p.get("steam_id", "")).strip() == target_steam_id:
+                user_player = p
+                break
 
-    # If couldn't find by ADR, try matching by kills/deaths
+    # Fallback: try matching by kills/deaths if steam_id lookup failed
     if not user_player:
         for p in players_stats:
             if p.get("kills") == kills and p.get("deaths") == deaths_count:

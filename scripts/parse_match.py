@@ -1486,6 +1486,18 @@ def parse_stats(
             # Build per-round death/kill details from deaths_df (fallback when rounds list is empty)
             attacker_name_col = find_col(deaths_df, ["attacker_name", "attackerName", "attacker_player_name"])
             victim_name_col = find_col(deaths_df, ["user_name", "victim_name", "victimName", "userid_name"])
+            # Team columns for side stats (demoparser2 uses numeric team values: 2=T, 3=CT)
+            _a_team_col = find_col(deaths_df_local, [
+                "attacker_team_num", "attackerTeam", "attacker_team",
+                "attacker_side", "attackerSide", "attackerteam",
+            ])
+            _v_team_col = find_col(deaths_df_local, [
+                "user_team_num", "victimTeam", "victim_team",
+                "victim_side", "victimSide", "userid_team_num",
+            ])
+            if debug_demo:
+                print(f"DEBUG: fallback team cols: attacker={_a_team_col}, victim={_v_team_col}")
+                print(f"DEBUG: deaths_df_local columns: {sorted(map(str, deaths_df_local.columns))}")
             for _, drow in deaths_df_local.iterrows():
                 rn = int(drow[round_key]) if pd.notna(drow.get(round_key)) else None
                 if not rn:
@@ -1500,7 +1512,6 @@ def parse_stats(
                 if a_id == target_steam_id:
                     user_round_kills[rn] = user_round_kills.get(rn, 0) + 1
                     # Compute side stats from team columns in deaths_df
-                    _a_team_col = find_col(deaths_df_local, ["attacker_team_num", "attackerTeam", "attacker_team", "attacker_side"])
                     if _a_team_col:
                         _a_side = normalize_side(drow.get(_a_team_col))
                         if _a_side == "CT":
@@ -1529,7 +1540,6 @@ def parse_stats(
                     if rn not in user_round_deaths:
                         user_round_deaths.append(rn)
                     # Compute side stats from team columns in deaths_df
-                    _v_team_col = find_col(deaths_df_local, ["user_team_num", "victimTeam", "victim_team", "victim_side"])
                     if _v_team_col:
                         _v_side = normalize_side(drow.get(_v_team_col))
                         if _v_side == "CT":
